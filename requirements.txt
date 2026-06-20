@@ -1,0 +1,31 @@
+# LiveKit Cognitive Memory & Affective Intelligence Agent — runtime deps.
+#
+# LiveKit agents framework + plugins (1.x AgentSession API).  Pinned to ~=1.6 because
+# the plugin kwargs (esp. elevenlabs.Voice/VoiceSettings shape, openai.LLM vs
+# openai.responses.LLM, ctx.wait_for_participant) move between minor versions.
+livekit-agents~=1.6
+livekit-plugins-openai~=1.6
+livekit-plugins-elevenlabs~=1.6
+livekit-plugins-deepgram~=1.6
+livekit-plugins-silero~=1.6
+
+# Cognitive memory layer.
+neo4j>=5.20             # official async driver (AsyncGraphDatabase)
+openai>=1.30            # post-call LLM fact extraction + sarcasm classification
+
+# Acoustic engine (librosa fallback path — always installed).
+librosa>=0.10
+soundfile>=0.12
+numpy>=1.26
+
+# Plumbing.
+pydantic>=2.7
+pydantic-settings>=2.4
+structlog>=24.1
+python-dotenv>=1.0
+
+# Dev / test.
+pytest>=8
+pytest-asyncio>=0.23
+ruff>=0.5
+mypy>=1.10

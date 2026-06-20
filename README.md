@@ -1,91 +1,64 @@
-# Advanced Voice AI Prototype
+# LiveKit Cognitive Voice AI Agent
 
-A low-latency, telephony-grade voice agent: **Twilio ⇄ Go Fair-Share orchestrator ⇄ Python streaming engine**,
-with an **Affective Memory** layer that adapts prosody to the caller's emotional state and self-corrects stale
-facts after every call.
+A voice agent that **remembers callers, reads their tone, and adapts how it sounds and
+what it says** — built on **LiveKit Agents** (UDP transport, VAD/STT/TTS plumbing) so 100%
+of our engineering goes into the *brain*:
 
-Built as a focused demonstration of the pieces an all-in-one voice platform typically *doesn't* expose: an
-explicit concurrency orchestrator, a swappable dual engine, and a contradiction-aware memory loop.
+- **Neo4j** graph memory (entity-resolved facts + trust scores per relationship)
+- **Acoustic engine** (librosa primary; SenseVoice + openSMILE optional)
+- **LLM contradiction & sarcasm filter** that cross-references *what was said* vs *how it sounded*
 
-```
- Twilio ──webhook──► Go Scheduler ──gRPC──► Python backend ──ws──► STT ─► LLM ─► TTS ──► Twilio
-                      (fair-share)                    │
-                                          Affective Memory (pre-call prosody + post-call contradiction engine)
-```
+> **Pivot note (Jun 2026).** The previous Twilio / Go-scheduler / FastAPI prototype is in
+> `archive/`. Low-level WebRTC is a commodity problem Ringg AI already solves world-class;
+> the value here is the cognitive memory layer.
 
-## Design honesty up front
+## The 4 "wow" features
 
-This prototype refuses to repeat three common-but-wrong claims (see [`docs/latency-budget.md`](docs/latency-budget.md)):
-
-1. **Sub-500ms is not reliable on a hand-rolled cascade** (~700ms–1.2s p50 is honest). Genuine sub-second is the
-   job of the **realtime speech-to-speech engine**, which we also ship — flip `ENGINE=realtime`.
-2. **OpenAI "Whisper streaming" doesn't exist** (`whisper-1` is batch). The default streaming STT is
-   **OpenAI realtime transcription** (`gpt-4o-transcribe`) — it **reuses your OpenAI key**, so no separate STT
-   account. Swappable to **Deepgram**, **ElevenLabs Scribe v2**, or the access-gated **Ringg Parrot** adapter.
-3. **ElevenLabs `voice_settings` are locked at socket init**, so dynamic prosody uses the **multi-context** socket.
-
-## Two engines, one interface
-
-| `ENGINE=cascade` (default) | `ENGINE=realtime` |
-|---|---|
-| Twilio → STT → GPT-4o (stream) → ElevenLabs Flash (`ulaw_8000`) | OpenAI Realtime API, `g711_ulaw` in/out |
-| Per-stage control, branded voice, fine prosody | Lowest latency, native VAD + barge-in |
-| ~800ms p50 target | sub-second target |
-
-Both implement `app/engines/base.py:VoiceEngine`, so `main.py` is engine-agnostic.
-
-## Stack
-
-- **Telephony:** Twilio bidirectional Media Streams (`<Connect><Stream>`), µ-law 8k / 20ms frames.
-- **Orchestrator:** Go — webhook, Fair-Share scheduler (channels/goroutines), gRPC, TwiML. *Heavily commented for
-  Go onboarding.*
-- **Engine:** Python 3.13 / FastAPI / asyncio.
-- **STT:** OpenAI realtime transcription (default, reuses OpenAI key) · Deepgram Nova-3 · ElevenLabs Scribe v2 · Ringg Parrot (access-gated, optional).
-- **LLM:** GPT-4o (streaming; `LLM_MODEL` configurable).
-- **TTS:** ElevenLabs `eleven_flash_v2_5`, `ulaw_8000`, multi-context.
-- **Memory:** Mem0 / Mem0g (ADD/UPDATE/DELETE/NOOP) over Postgres+pgvector and FalkorDB.
-
-## Quickstart
-
-```bash
-cp .env.example .env          # an OPENAI_API_KEY alone powers both STT + LLM; add ELEVENLABS for real TTS
-make proto                    # generate gRPC stubs (needs protoc + grpcio-tools)
-make up                       # docker compose: scheduler + backend + postgres + falkordb + redis
-make test                     # go + python test suites
-make demo                     # replay a recorded call into /media and print the latency breakdown
-make ui                       # Ringg-styled test console → http://localhost:8000
-```
-
-## Test console
-
-`make ui` serves a small **Ringg-styled dashboard** (`backend/app/static/index.html`) that exercises the *real*
-system in a browser — no Twilio needed, and fully functional with no API keys (mock providers):
-
-- **Assistants** — the Cascade and Realtime engines as cards, with live/mock provider badges.
-- **Chat test** — type to the agent; each turn runs the real pre-call prosody hook → LLM → TTS, returns the
-  reply + playable audio + **live-measured latency**.
-- **Caller emotional state** — seed an emotion and watch the agent's prosody adapt on the next turn (the affective
-  feedback loop, made interactive).
-- **Analyze call** — runs the same **Contradiction Engine** the post-call worker uses; teach a fact (“my plan is
-  pro”), change it (“…enterprise”), and watch it resolve **ADD → UPDATE**. Memory is session-scoped, so every
-  reload is a clean slate.
-
-Point a Twilio number's Voice webhook at `https://<your-ngrok-host>/voice` and set
-`MEDIA_WS_URL=wss://<your-ngrok-host>/media`.
+| # | Feature | Where it lives |
+|---|---|---|
+| 1 | **Sarcasm & Truth Filter** | `memory/post_call.py` + `graph_engine.apply_facts` — positive text + agitated tone → `trust_score = 0.2`, `"Likely Sarcastic"` reasoning |
+| 2 | **Adaptive Verbosity** | Interruption counter → `conversation_style="impatient"` → `pre_call` injects *"10 words or less"* |
+| 3 | **Proactive Empathy** | `get_user_context` surfaces last severe negative event → `session.say()` opens with it |
+| 4 | **Dynamic Prosody** | `prosody.to_elevenlabs_voice` — frustrated/angry → calm voice, `stability=0.95` |
 
 ## Layout
 
 ```
-proto/        gRPC contract (Go ⇄ Python)
-scheduler/    Module 1 — Go orchestrator
-backend/      Modules 2 & 3 — Python engine + memory
-docs/         architecture + the honest latency budget
+agent.py                 # LiveKit worker entrypoint (1.x AgentSession)
+config.py                # pydantic-settings, .env loader
+audio_capture.py         # rtc.AudioStream → WAV   (Step 2)
+memory/
+  schemas.py             # AffectiveState, Assertion, ParticipantContext, PrecallResult, …
+  prosody.py             # ProsodyProfile + to_elevenlabs_voice
+  pre_call.py            # build_precall_context (Dynamic Prosody + Verbosity + Empathy)
+  graph_engine.py        # Neo4j async + sarcasm/contradiction/decay   (Step 2)
+  acoustic_engine.py     # analyze_audio (librosa + optional rich)     (Step 3)
+  post_call.py           # process_post_call / schedule_post_call      (Step 3)
+docker-compose.yml       # neo4j + redis + livekit-server (dev)
+requirements.txt
+requirements-rich.txt    # optional SenseVoice / openSMILE / torch
+archive/                 # previous Twilio/Go/FastAPI prototype (salvage source)
 ```
 
-## Notes for reviewers
+## Quick start
 
-- **STT reuses the OpenAI key** (`backend/app/providers/stt_openai.py`, `gpt-4o-transcribe` realtime WebSocket) —
-  no separate STT account. The access-gated **Ringg Parrot** adapter (`stt_ringg.py`) is kept as a ready-to-finish
-  drop-in (only its transport methods are TODO) for whoever has Ringg access.
-- The contradiction engine wraps **Mem0**, whose extract→update phase *is* the ADD/UPDATE/DELETE/NOOP loop; a thin
-  deterministic guard logs and can force-overwrite flagged keys since the LLM step is probabilistic.
+```bash
+docker compose up -d                 # neo4j (browser :7474), redis, livekit-server (dev)
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env                 # fill OPENAI/ELEVENLABS/DEEPGRAM (LiveKit dev keys preloaded)
+python agent.py dev                  # registers with LIVEKIT_URL
+```
+
+Open the **LiveKit Agents Playground**, join the dev room with metadata
+`{"user_id":"u1","tenant_id":"t1"}`. With no graph state seeded yet, the agent behaves as a
+stock voice assistant. After Steps 2-3, seeding a frustrated `AffectiveState` + a
+`Flight_Cancellation` event makes it open with the empathy line in the calm voice and
+brief replies.
+
+## Status
+
+- ✅ **Step 1** — scaffold (`config`, `schemas`, `prosody`, `pre_call`, `agent`, deps, compose, .env)
+- ☐ **Step 2** — `graph_engine.py` (Neo4j async) + `audio_capture.py`
+- ☐ **Step 3** — `acoustic_engine.py` + `post_call.py` + disconnect wiring
+- ☐ **Step 4** — tests + end-to-end demo

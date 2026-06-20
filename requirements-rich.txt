@@ -1,0 +1,7 @@
+# Optional: rich post-call acoustic engine (SenseVoice + openSMILE).
+# Heavy / GPU-friendly — install only if you want the deep paralinguistic profile
+# (acoustic emotion tags, audio events, eGeMAPS biometrics, LLM contradiction pass).
+# When absent, acoustic_engine.py falls back to the librosa-only heuristic.
+funasr>=1.1
+opensmile>=2.5
+torch>=2.2

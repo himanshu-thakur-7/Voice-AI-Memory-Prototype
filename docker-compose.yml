@@ -1,64 +1,52 @@
-# Local stack for the Voice AI Prototype.
-#   docker compose up        → scheduler (Go) + backend (Python) + datastores
-# The two app services build from their own Dockerfiles; datastores are stock images.
+# Local dev stack for the LiveKit Cognitive Agent.
+#
+#   docker compose up    →   Neo4j (browser :7474), Redis (:6379), LiveKit server (dev mode, :7880).
+#
+# LiveKit dev keys match .env.example exactly so `python agent.py dev` registers immediately.
+
 services:
-  scheduler:
-    build: ./scheduler
-    env_file: .env
+  neo4j:
+    image: neo4j:5.20
+    container_name: cognitive-neo4j
     ports:
-      - "8080:8080"          # Twilio webhook (POST /voice) + health
-    depends_on:
-      backend:
-        condition: service_started
-    restart: unless-stopped
-
-  backend:
-    build: ./backend
-    env_file: .env
-    ports:
-      - "8000:8000"          # FastAPI: /media WebSocket + /healthz
-      - "50051:50051"        # gRPC Orchestrator server
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_started
-      falkordb:
-        condition: service_started
-    restart: unless-stopped
-
-  postgres:
-    image: pgvector/pgvector:pg16
+      - "7474:7474"   # browser UI
+      - "7687:7687"   # bolt
     environment:
-      POSTGRES_USER: voiceai
-      POSTGRES_PASSWORD: voiceai
-      POSTGRES_DB: voiceai
-    ports:
-      - "5432:5432"
+      NEO4J_AUTH: "neo4j/cognitive-dev-password"
+      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_dbms_security_procedures_unrestricted: "apoc.*"
     volumes:
-      - pgdata:/var/lib/postgresql/data
-      - ./backend/sql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - neo4j_data:/data
+      - neo4j_logs:/logs
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U voiceai"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
-  # FalkorDB is a Redis-protocol graph DB; Mem0g (graph memory) targets it for
-  # per-user graph isolation. Optional — only used when MEM0_GRAPH_ENABLED=true.
-  falkordb:
-    image: falkordb/falkordb:latest
-    ports:
-      - "6380:6379"          # host 6380 to avoid clashing with redis below
-    volumes:
-      - falkordata:/data
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p cognitive-dev-password 'RETURN 1' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
 
   redis:
     image: redis:7-alpine
+    container_name: cognitive-redis
     ports:
       - "6379:6379"
-    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  livekit:
+    # LiveKit server in dev mode — accepts the same devkey/devsecret as .env.example.
+    image: livekit/livekit-server:latest
+    container_name: cognitive-livekit
+    command: ["--dev"]
+    ports:
+      - "7880:7880"   # WebSocket / signaling
+      - "7881:7881"   # TCP fallback
+      - "7882:7882/udp"  # WebRTC media
+    environment:
+      LIVEKIT_KEYS: "devkey: devsecret123456789012345678901234"
 
 volumes:
-  pgdata:
-  falkordata:
+  neo4j_data:
+  neo4j_logs:
