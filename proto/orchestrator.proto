@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+// The orchestrator contract is the seam between the Go scheduler (Module 1) and
+// the Python streaming backend (Module 2/3). The Go service ADMITS a call and,
+// *before* Twilio opens the media WebSocket, pushes the call context here so the
+// Python side can warm up provider sockets and run the pre-call memory lookup —
+// eliminating a cold-start race on the latency-critical first turn.
+
+package orchestrator.v1;
+
+option go_package = "github.com/voiceai/scheduler/internal/pb;pb";
+
+service Orchestrator {
+  // Called by the Go scheduler the moment a call is admitted. Returns the wss URL
+  // the scheduler should embed in the TwiML <Connect><Stream> it hands back to Twilio.
+  rpc RegisterCall(RegisterCallRequest) returns (RegisterCallResponse);
+
+  // Liveness/fair-share telemetry: the scheduler streams periodic heartbeats so the
+  // backend can report active-session pressure back (used to shed load gracefully).
+  rpc Heartbeat(stream HeartbeatRequest) returns (stream HeartbeatResponse);
+}
+
+// CallContext travels with the call from the webhook all the way into the
+// per-call VoiceEngine. affective_hint is an OPTIONAL fast-path: if the scheduler
+// already knows (from a cheap Redis lookup) that this caller was "frustrated" last
+// time, it can pass the hint so prosody is right from word one.
+message CallContext {
+  string call_sid    = 1;  // Twilio CallSid (CA...)
+  string stream_sid  = 2;  // Twilio StreamSid (MZ...), filled in once the stream starts
+  string from        = 3;  // caller E.164
+  string to          = 4;  // called E.164
+  string tenant_id   = 5;  // for fair-share accounting + per-user memory isolation
+  string user_id     = 6;  // stable identity for the memory graph (mem0_<user_id>)
+  string affective_hint = 7;  // optional: "frustrated" | "neutral" | "happy" | ""
+  string engine      = 8;  // "cascade" | "realtime" — selectable per call
+  map<string, string> custom = 9;  // passthrough <Parameter> values
+}
+
+message RegisterCallRequest {
+  CallContext context = 1;
+}
+
+message RegisterCallResponse {
+  string media_ws_url = 1;  // wss://backend/media — embedded in TwiML by the scheduler
+  bool   accepted     = 2;  // backend may reject (e.g. over capacity) → scheduler returns <Reject>
+  string reason       = 3;
+}
+
+message HeartbeatRequest {
+  string scheduler_id   = 1;
+  int32  admitted_calls = 2;  // calls the scheduler currently believes are live
+  int64  unix_millis    = 3;
+}
+
+message HeartbeatResponse {
+  int32  active_sessions      = 1;  // sessions the backend actually has open
+  double session_pressure     = 2;  // 0.0..1.0 — scheduler uses this to throttle admission
+}

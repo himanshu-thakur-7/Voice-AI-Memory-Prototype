@@ -1,0 +1,71 @@
+[project]
+name = "voiceai-backend"
+version = "0.1.0"
+description = "Sub-latency streaming voice engine + affective memory (Modules 2 & 3)"
+requires-python = ">=3.13"
+
+# Core runtime — enough to run the streaming loop with the MOCK providers (no keys).
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "websockets>=12.0",
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+    "structlog>=24.1",
+    "httpx>=0.27",
+    "tenacity>=8.2",
+    "audioop-lts>=0.2.1; python_version >= '3.13'",  # µ-law codec (audioop removed from stdlib in 3.13)
+]
+
+[project.optional-dependencies]
+# Provider SDKs — installed when you wire real STT/LLM/TTS.
+providers = [
+    "openai>=1.30",
+    "deepgram-sdk>=3.2",
+    "ringglabs",            # Ringg Parrot STT (prod access via sales@ringg.ai)
+]
+# Affective memory + contradiction engine (Module 3).
+memory = [
+    "mem0ai>=0.1.40",
+    "psycopg[binary]>=3.1",
+    "pgvector>=0.2",
+    "redis>=5.0",
+    "librosa>=0.10",
+    "soundfile>=0.12",
+]
+# Rich post-call paralinguistic engine (heavy/GPU-friendly; optional). When absent the
+# post-call worker falls back to the dependency-free heuristic. See memory/paralinguistics.py.
+paralinguistics = [
+    "funasr>=1.1",        # SenseVoice ASR + emotion + audio events
+    "opensmile>=2.5",     # eGeMAPS voice biometrics
+    "librosa>=0.10",      # temporal / pitch dynamics
+    "soundfile>=0.12",
+    "torch>=2.2",
+    "numpy>=1.26",
+    "openai>=1.30",       # lexical contradiction pass
+]
+grpc = ["grpcio>=1.62", "grpcio-tools>=1.62", "protobuf>=4.25"]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.4",
+    "mypy>=1.9",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["E501"]   # readable test data lines may exceed the limit
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.13"
+ignore_missing_imports = true   # provider/ML SDKs are optional & lazily imported

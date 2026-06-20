@@ -1,0 +1,23 @@
+# secrets
+.env
+
+# python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+
+# go
+/scheduler/scheduler
+*.test
+
+# generated gRPC stubs (run `make proto`)
+/scheduler/internal/pb/*.pb.go
+/backend/app/pb/*_pb2.py
+/backend/app/pb/*_pb2_grpc.py
+
+# os
+.DS_Store

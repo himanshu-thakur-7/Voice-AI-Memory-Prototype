@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Voice AI · Test Console</title>
+<style>
+  :root{
+    /* Ringg-inspired light SaaS theme — retheme by changing --brand. */
+    --brand:#5b63f5; --brand-ink:#4348d8; --brand-soft:#eef0ff;
+    --accent:#10b3a3; --bg:#f5f6fb; --panel:#ffffff; --ink:#171a23; --muted:#727892;
+    --border:#e8eaf3; --danger:#e5484d; --warn:#e8920c; --ok:#16a34a;
+    --shadow:0 1px 2px rgba(20,22,40,.04), 0 10px 30px rgba(20,22,40,.06);
+    --radius:14px;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+    background:var(--bg);color:var(--ink);display:grid;grid-template-columns:248px 1fr;min-height:100vh;-webkit-font-smoothing:antialiased}
+
+  /* sidebar */
+  .sidebar{background:var(--panel);border-right:1px solid var(--border);padding:22px 16px;display:flex;flex-direction:column;gap:6px}
+  .brand{display:flex;align-items:center;gap:11px;padding:6px 8px 22px}
+  .logo{width:34px;height:34px;border-radius:10px;background:linear-gradient(135deg,var(--brand),#8a73ff);display:grid;place-items:center;color:#fff;font-size:18px;box-shadow:0 4px 12px rgba(91,99,245,.35)}
+  .brand b{font-size:15px;letter-spacing:-.2px}
+  .brand small{display:block;color:var(--muted);font-size:11px;font-weight:500}
+  .nav{display:flex;flex-direction:column;gap:2px;margin-top:6px}
+  .nav a{display:flex;align-items:center;gap:11px;padding:10px 12px;border-radius:10px;color:var(--muted);text-decoration:none;font-size:14px;font-weight:500;cursor:pointer}
+  .nav a:hover{background:var(--bg);color:var(--ink)}
+  .nav a.active{background:var(--brand-soft);color:var(--brand-ink);font-weight:600}
+  .nav a .i{width:18px;text-align:center}
+  .side-foot{margin-top:auto;padding:12px 10px;font-size:11px;color:var(--muted);line-height:1.5;border-top:1px solid var(--border)}
+
+  /* top bar */
+  main{display:flex;flex-direction:column;min-width:0}
+  .topbar{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:18px 28px;border-bottom:1px solid var(--border);background:var(--panel)}
+  .topbar h1{font-size:18px;margin:0;letter-spacing:-.3px}
+  .topbar .sub{color:var(--muted);font-size:13px;margin-top:2px}
+  .pills{display:flex;gap:8px;flex-wrap:wrap}
+  .pill{display:inline-flex;align-items:center;gap:7px;background:var(--bg);border:1px solid var(--border);border-radius:999px;padding:6px 12px;font-size:12px;font-weight:500;color:var(--ink)}
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--muted)}
+  .dot.live{background:var(--ok)} .dot.mock{background:var(--warn)}
+
+  .content{padding:26px 28px;overflow:auto}
+
+  /* assistants grid */
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:18px}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow);padding:20px}
+  .acard .head{display:flex;align-items:center;gap:13px;margin-bottom:12px}
+  .avatar{width:42px;height:42px;border-radius:11px;display:grid;place-items:center;font-size:20px;color:#fff}
+  .avatar.cascade{background:linear-gradient(135deg,#5b63f5,#8a73ff)}
+  .avatar.realtime{background:linear-gradient(135deg,#10b3a3,#36cfa0)}
+  .acard h3{margin:0;font-size:15px}
+  .acard .meta{color:var(--muted);font-size:12px}
+  .acard p{color:var(--muted);font-size:13px;line-height:1.55;margin:10px 0 14px}
+  .chips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:16px}
+  .chip{font-size:11px;font-weight:600;padding:4px 9px;border-radius:7px;background:var(--brand-soft);color:var(--brand-ink)}
+  .chip.gray{background:var(--bg);color:var(--muted)}
+
+  /* buttons */
+  .btn{appearance:none;border:1px solid transparent;border-radius:10px;padding:10px 16px;font-size:14px;font-weight:600;cursor:pointer;font-family:inherit}
+  .btn.primary{background:var(--brand);color:#fff} .btn.primary:hover{background:var(--brand-ink)}
+  .btn.ghost{background:var(--panel);border-color:var(--border);color:var(--ink)} .btn.ghost:hover{background:var(--bg)}
+  .btn.sm{padding:7px 12px;font-size:13px}
+  .btn:disabled{opacity:.5;cursor:not-allowed}
+
+  /* console layout */
+  .console{display:grid;grid-template-columns:1fr 320px;gap:18px;align-items:start}
+  .thread{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow);display:flex;flex-direction:column;height:calc(100vh - 184px);min-height:420px}
+  .thread .scroll{flex:1;overflow:auto;padding:20px;display:flex;flex-direction:column;gap:12px}
+  .msg{max-width:78%;padding:11px 14px;border-radius:14px;font-size:14px;line-height:1.5}
+  .msg.user{align-self:flex-end;background:var(--brand);color:#fff;border-bottom-right-radius:5px}
+  .msg.bot{align-self:flex-start;background:var(--bg);border:1px solid var(--border);border-bottom-left-radius:5px}
+  .msg .who{font-size:10px;text-transform:uppercase;letter-spacing:.5px;opacity:.7;margin-bottom:3px;font-weight:700}
+  .empty{margin:auto;text-align:center;color:var(--muted);font-size:13px;max-width:260px;line-height:1.6}
+  .composer{display:flex;gap:10px;padding:14px;border-top:1px solid var(--border)}
+  .composer input{flex:1;border:1px solid var(--border);border-radius:10px;padding:11px 14px;font-size:14px;font-family:inherit;outline:none}
+  .composer input:focus{border-color:var(--brand);box-shadow:0 0 0 3px var(--brand-soft)}
+
+  .rail{display:flex;flex-direction:column;gap:16px}
+  .panel{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow);padding:16px}
+  .panel h4{margin:0 0 4px;font-size:13px}
+  .panel .hint{color:var(--muted);font-size:11.5px;margin:0 0 12px;line-height:1.5}
+  .emos{display:flex;flex-wrap:wrap;gap:7px}
+  .emo{font-size:12px;font-weight:600;padding:6px 11px;border-radius:999px;border:1px solid var(--border);background:var(--panel);color:var(--ink);cursor:pointer}
+  .emo:hover{border-color:var(--brand)} .emo.on{background:var(--brand);color:#fff;border-color:var(--brand)}
+  .badge{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;padding:5px 10px;border-radius:8px;background:var(--brand-soft);color:var(--brand-ink)}
+  .lat{display:grid;grid-template-columns:1fr auto;gap:8px 12px;font-size:13px}
+  .lat .k{color:var(--muted)} .lat .v{font-variant-numeric:tabular-nums;font-weight:600}
+  .ops{display:flex;flex-direction:column;gap:8px;margin-top:10px}
+  .op{display:flex;gap:10px;align-items:flex-start;font-size:12.5px;line-height:1.45}
+  .optag{font-size:10px;font-weight:800;letter-spacing:.4px;padding:3px 7px;border-radius:6px;color:#fff;flex:none;margin-top:1px}
+  .op-ADD{background:var(--ok)} .op-UPDATE{background:var(--warn)} .op-DELETE{background:var(--danger)} .op-NOOP{background:#9aa1b5}
+  .op .sup{color:var(--muted);text-decoration:line-through}
+  .toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);background:#171a23;color:#fff;padding:10px 16px;border-radius:10px;font-size:13px;box-shadow:var(--shadow);opacity:0;transition:opacity .2s;pointer-events:none}
+  .toast.show{opacity:1}
+  .hidden{display:none}
+</style>
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="logo">◈</div>
+      <div><b>VoiceLab</b><small>test console</small></div>
+    </div>
+    <nav class="nav">
+      <a data-view="assistants" class="active"><span class="i">▦</span> Assistants</a>
+      <a data-view="console"><span class="i">✎</span> Test Console</a>
+    </nav>
+    <div class="side-foot">
+      Cascade target ~800ms p50 · realtime sub-second.<br>Honest budget in <code>docs/latency-budget.md</code>.
+    </div>
+  </aside>
+
+  <main>
+    <div class="topbar">
+      <div>
+        <h1 id="page-title">Assistants</h1>
+        <div class="sub" id="page-sub">Pick an agent to test</div>
+      </div>
+      <div class="pills" id="status-pills"></div>
+    </div>
+
+    <div class="content">
+      <!-- ASSISTANTS -->
+      <section id="view-assistants">
+        <div class="grid" id="assistant-grid"></div>
+      </section>
+
+      <!-- TEST CONSOLE -->
+      <section id="view-console" class="hidden">
+        <div class="console">
+          <div class="thread">
+            <div class="scroll" id="thread">
+              <div class="empty" id="thread-empty">
+                Say hello to your agent. Try teaching it a fact (“my plan is pro”), then
+                change it (“my plan is enterprise”) and hit <b>Analyze call</b> to watch the
+                contradiction engine fire.
+              </div>
+            </div>
+            <div class="composer">
+              <input id="msg" placeholder="Type a message to the agent…" autocomplete="off" />
+              <button class="btn primary" id="send">Send</button>
+            </div>
+          </div>
+
+          <div class="rail">
+            <div class="panel">
+              <h4>Caller emotional state</h4>
+              <p class="hint">Pre-call memory. Seeding an emotion changes the agent’s prosody &amp; system prompt on the <b>next</b> turn — the affective feedback loop.</p>
+              <div class="emos" id="emos"></div>
+              <div style="margin-top:12px" id="prosody-wrap" class="hidden">
+                applied prosody: <span class="badge" id="prosody-badge">neutral</span>
+              </div>
+            </div>
+
+            <div class="panel">
+              <h4>This turn · latency</h4>
+              <p class="hint">Live-measured (mock providers measure plumbing; real keys measure real models).</p>
+              <div class="lat" id="lat">
+                <span class="k">LLM TTFT</span><span class="v" id="l-ttft">—</span>
+                <span class="k">TTS first byte</span><span class="v" id="l-tts">—</span>
+                <span class="k">Total</span><span class="v" id="l-total">—</span>
+              </div>
+            </div>
+
+            <div class="panel">
+              <h4>Post-call analysis</h4>
+              <p class="hint">Runs the same Contradiction Engine (Mem0-style ADD/UPDATE/DELETE/NOOP) the post-call worker uses.</p>
+              <button class="btn ghost sm" id="analyze">Analyze call</button>
+              <button class="btn ghost sm" id="reset">Reset</button>
+              <div class="ops" id="ops"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <div class="toast" id="toast"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const api = (p, body) => fetch(p, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json());
+let sessionId = (crypto.randomUUID ? crypto.randomUUID() : 'sess-'+Date.now());
+const newSession = () => sessionId = (crypto.randomUUID ? crypto.randomUUID() : 'sess-'+Date.now());
+let engine = 'cascade';
+let currentEmotion = 'neutral';
+
+const AGENTS = {
+  cascade:  {icon:'☎', title:'Cascade Agent',  meta:'STT → GPT-4o → ElevenLabs', desc:'Per-stage control with branded voice and fine prosody. Honest ~800ms p50 target.'},
+  realtime: {icon:'⚡', title:'Realtime Agent', meta:'OpenAI Realtime (speech-to-speech)', desc:'One streaming model, native VAD + barge-in. The path to genuine sub-second latency.'},
+};
+
+function toast(t){const el=$('#toast');el.textContent=t;el.classList.add('show');setTimeout(()=>el.classList.remove('show'),1900);}
+
+function show(view){
+  $('#view-assistants').classList.toggle('hidden', view!=='assistants');
+  $('#view-console').classList.toggle('hidden', view!=='console');
+  document.querySelectorAll('.nav a').forEach(a=>a.classList.toggle('active', a.dataset.view===view));
+  $('#page-title').textContent = view==='console' ? AGENTS[engine].title : 'Assistants';
+  $('#page-sub').textContent = view==='console' ? AGENTS[engine].meta : 'Pick an agent to test';
+}
+document.querySelectorAll('.nav a').forEach(a=>a.onclick=()=>show(a.dataset.view));
+
+async function loadConfig(){
+  const c = await fetch('/api/config').then(r=>r.json());
+  const p = c.providers;
+  const pill = (label,o)=>`<span class="pill"><span class="dot ${o.live?'live':'mock'}"></span>${label}: ${o.name}${o.live?'':' (mock)'}</span>`;
+  $('#status-pills').innerHTML =
+    `<span class="pill"><span class="dot live"></span>engine: ${c.engine}</span>`+
+    pill('STT',p.stt)+pill('LLM',p.llm)+pill('TTS',p.tts);
+
+  $('#assistant-grid').innerHTML = c.engines.map(e=>{
+    const a=AGENTS[e]; const live=[p.stt,p.llm,p.tts];
+    const chips = (e==='realtime')
+      ? `<span class="chip">OpenAI Realtime</span><span class="chip">native VAD</span>`
+      : `<span class="chip">${p.stt.name} STT</span><span class="chip">${p.llm.name} LLM</span><span class="chip">${p.tts.name} TTS</span>`;
+    return `<div class="card acard">
+      <div class="head"><div class="avatar ${e}">${a.icon}</div>
+        <div><h3>${a.title}</h3><div class="meta">${a.meta}</div></div></div>
+      <p>${a.desc}</p>
+      <div class="chips">${chips}<span class="chip gray">affective memory</span></div>
+      <button class="btn primary" data-engine="${e}">Open test console →</button>
+    </div>`;
+  }).join('');
+  document.querySelectorAll('[data-engine]').forEach(b=>b.onclick=()=>{engine=b.dataset.engine;resetThread();show('console');});
+
+  // emotion chips
+  $('#emos').innerHTML = c.emotions.map(e=>`<button class="emo${e===currentEmotion?' on':''}" data-emo="${e}">${e}</button>`).join('');
+  document.querySelectorAll('.emo').forEach(b=>b.onclick=()=>seedEmotion(b.dataset.emo));
+}
+
+function addMsg(role, text){
+  $('#thread-empty')?.remove();
+  const el=document.createElement('div');
+  el.className='msg '+(role==='user'?'user':'bot');
+  el.innerHTML=`<div class="who">${role==='user'?'Caller':'Agent'}</div>${text}`;
+  $('#thread').appendChild(el); $('#thread').scrollTop=1e9;
+}
+
+async function send(){
+  const input=$('#msg'); const text=input.value.trim(); if(!text)return;
+  input.value=''; addMsg('user',text); $('#send').disabled=true;
+  try{
+    const r=await api('/api/chat',{session_id:sessionId,engine,text});
+    addMsg('bot', r.reply);
+    $('#l-ttft').textContent = fmt(r.latency.llm_ttft_ms);
+    $('#l-tts').textContent  = fmt(r.latency.tts_first_byte_ms);
+    $('#l-total').textContent= fmt(r.latency.total_ms);
+    $('#prosody-wrap').classList.remove('hidden'); $('#prosody-badge').textContent=r.prosody;
+    if(r.audio){ new Audio('data:audio/wav;base64,'+r.audio).play().catch(()=>{}); }
+  }catch(e){ toast('chat failed'); }
+  $('#send').disabled=false; input.focus();
+}
+const fmt = v => (v==null?'—':v+' ms');
+
+async function seedEmotion(emo){
+  currentEmotion=emo;
+  document.querySelectorAll('.emo').forEach(b=>b.classList.toggle('on',b.dataset.emo===emo));
+  const r=await api('/api/seed-emotion',{session_id:sessionId,emotion:emo});
+  $('#prosody-wrap').classList.remove('hidden'); $('#prosody-badge').textContent=r.prosody;
+  toast(`caller set to “${emo}” → prosody “${r.prosody}” on next turn`);
+}
+
+async function analyze(){
+  const r=await api('/api/analyze',{session_id:sessionId});
+  const rows=(r.decisions||[]).map(d=>`<div class="op">
+      <span class="optag op-${d.op}">${d.op}</span>
+      <div>${d.new_fact}${d.superseded?` <span class="sup">(was: ${d.superseded})</span>`:''}</div></div>`).join('');
+  const state=r.affective_state ? `<div class="op"><span class="optag" style="background:var(--brand)">AFFECT</span>
+      <div>${r.affective_state.emotion} · valence ${r.affective_state.valence} · arousal ${r.affective_state.arousal}</div></div>`:'';
+  $('#ops').innerHTML = (rows||'<div class="hint">No factual assertions detected yet — try “my plan is pro”.</div>')+state;
+}
+
+function resetThread(){
+  api('/api/reset',{session_id:sessionId}); newSession(); currentEmotion='neutral';
+  document.querySelectorAll('.emo').forEach(b=>b.classList.toggle('on',b.dataset.emo==='neutral'));
+  $('#prosody-wrap').classList.add('hidden');
+  $('#thread').innerHTML='<div class="empty" id="thread-empty">Fresh session. Say hello, teach a fact, then change it and Analyze.</div>';
+  $('#ops').innerHTML=''; ['l-ttft','l-tts','l-total'].forEach(i=>$('#'+i).textContent='—');
+}
+
+$('#send').onclick=send;
+$('#msg').addEventListener('keydown',e=>{if(e.key==='Enter')send();});
+$('#analyze').onclick=analyze;
+$('#reset').onclick=resetThread;
+loadConfig();
+</script>
+</body>
+</html>
