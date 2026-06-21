@@ -259,8 +259,16 @@ class CognitiveGraph:
                  user=state.user_id, tenant=state.tenant_id, emotion=state.emotion.value,
                  style=conversation_style.value, has_event=last_negative_event is not None)
 
-    def extract_facts_to_triplets(self, transcript: str) -> list[dict[str, str]]:
-        """LLM fact extraction — prompt ported verbatim from the user's prototype.
+    def extract_facts_to_triplets(
+        self, transcript: str, caller_name: str = "User"
+    ) -> list[dict[str, str]]:
+        """LLM fact extraction. ``caller_name`` is forced as the subject for caller-facts.
+
+        The seed uses a real name (e.g. "Anil") as the subject of the (Anil, REL, X) facts;
+        without ``caller_name`` the LLM extracts facts with subject="User" or "Caller", and
+        the contradiction resolver fails to match — UPDATEs slip through as ADDs and the
+        graph forks into "Anil" and "User" namespaces. Fix: tell the extractor exactly
+        which name to use, in line with whatever the seed set.
 
         Synchronous because the OpenAI client is sync; ``memory.post_call`` wraps the call
         in ``asyncio.to_thread`` so the event loop stays free.
@@ -276,14 +284,36 @@ class CognitiveGraph:
             self._openai = OpenAI(api_key=self._settings.openai_api_key)
 
         system_prompt = (
-            "You are a precise Knowledge Graph extraction engine. Extract the core factual "
-            "assertions from the transcript into strict Subject-Predicate-Object triplets. "
-            "Focus on relationships, feelings towards entities, life events, and "
-            "preferences.\n"
-            "Output strictly as a JSON object with a single key 'triplets' whose value is a "
-            "list of objects with 'subject', 'predicate', and 'object' keys.\n"
-            "Example: {\"triplets\": [{\"subject\": \"User\", \"predicate\": \"dislikes\", "
-            "\"object\": \"Mother\"}]}"
+            "You are a precise Knowledge Graph extraction engine for a CALLER's history.\n"
+            f"The caller's canonical name is '{caller_name}'.\n"
+            "STRICT RULES — read carefully:\n"
+            f"1. SUBJECT: for facts about the caller, use EXACTLY '{caller_name}'. NEVER "
+            "use 'User', 'Caller', 'I', or 'me' — always the caller's name. NEVER emit "
+            "triplets with subject 'Agent', 'AI', 'Assistant', or the agent's name.\n"
+            "2. SKIP everything that is not a stable fact: greetings, acknowledgements, "
+            "small talk, the agent's questions, transient feelings ('I'm tired right now'), "
+            "and conversational fillers.\n"
+            "3. EXTRACT ONLY substantive, durable facts: employment, possessions, "
+            "decisions, preferences ('prefers X'), grievances ('is owed Y'), commitments, "
+            "family, specific events, and concrete relationships with named entities.\n"
+            "4. PREDICATES must be normalized verb phrases like 'is COO of', 'is "
+            "considering', 'is owed', 'works with', 'prefers', 'received', 'chose', "
+            "'rejected'. Use the SAME predicate wording the existing graph uses for the "
+            "same concept ('received' overrides a prior 'is owed' of the same object).\n"
+            "5. OBJECTS must be specific noun phrases — proper nouns or concrete concepts. "
+            "Avoid generic things like 'the airport', 'help', or fragments of agent replies. "
+            "If the caller mentions a known entity (e.g. 'Q3 credits'), use the canonical "
+            "name format ('Service_Credits_Q3' if that's the existing form).\n"
+            "6. If a turn contains NO substantive caller facts, emit an EMPTY triplets "
+            "list. Don't invent.\n\n"
+            "Output STRICTLY as a JSON object with a single key 'triplets' whose value is "
+            "a list of objects with 'subject', 'predicate', and 'object' keys.\n"
+            f"Good example: {{\"triplets\": [{{\"subject\": \"{caller_name}\", "
+            "\"predicate\": \"received\", \"object\": \"Service_Credits_Q3\"}]}\n"
+            "Bad examples (DO NOT emit): {\"subject\":\"User\",\"predicate\":\"greets\","
+            "\"object\":\"Agent\"}, {\"subject\":\"Agent\",\"predicate\":\"is sorry to "
+            "hear\",\"object\":\"X\"}, {\"subject\":\"User\",\"predicate\":\"is at\","
+            "\"object\":\"the airport\"}."
         )
         try:
             resp = self._openai.chat.completions.create(
@@ -372,14 +402,30 @@ class CognitiveGraph:
         system_prompt = (
             "You are an advanced Contradiction Resolution Engine for an AI memory graph. "
             "You will be given a list of EXISTING facts in the database, and a list of NEW "
-            "facts just extracted. You will also be given the user's current AFFECTIVE STATE "
-            "(their true underlying emotional reality). Determine the database operations "
-            "needed to maintain absolute truth.\n\n"
-            "Rules:\n"
-            "1. If a new fact contradicts an old fact, output an 'UPDATE' overwriting it.\n"
+            "facts just extracted. You will also be given the user's current AFFECTIVE "
+            "STATE (their true underlying emotional reality). Determine the database "
+            "operations needed to maintain absolute truth.\n\n"
+            "ENTITY MATCHING — treat the following as the SAME entity for contradiction "
+            "detection:\n"
+            " • 'User' = 'Caller' = the caller's name (e.g. 'Anil')\n"
+            " • Name variants of the same thing: 'AlphaVoice' = 'Alpha_Voice' = "
+            "'Competitor_AlphaVoice', 'Q3 credits' = 'Q3_Credits' = 'Service_Credits_Q3', "
+            "'CSM Priya' = 'Priya' = 'CSM_Priya'. Look past tokenization differences and "
+            "naming conventions.\n"
+            " • Predicate variants of the same concept: 'received' negates 'is owed' for "
+            "the same object; 'chose' / 'rejected' negate 'is considering' for the same "
+            "object; 'no longer X' negates 'is X'.\n\n"
+            "OPERATIONS:\n"
+            "1. If a new fact CONTRADICTS an existing fact (after matching entities / "
+            "predicates as above), output 'UPDATE'. ALWAYS prefer UPDATE over ADD when "
+            "the new fact is about the same subject+concept as an existing one — the goal "
+            "is to keep belief history coherent, not to fork it.\n"
             "2. Use AFFECTIVE STATE as context. If 'masking_grief' or 'sarcastic', weigh "
-            "facts accordingly.\n"
-            "3. If a new fact is entirely new, output 'ADD'.\n\n"
+            "the new fact's trust accordingly (lower).\n"
+            "3. If a new fact is genuinely about a NEW subject+concept, output 'ADD'.\n"
+            "4. When emitting UPDATE, use the EXISTING fact's subject and object form so "
+            "the resolver can find it (e.g. write 'subject:Anil' not 'subject:User' if the "
+            "existing fact uses 'Anil').\n\n"
             'Output STRICTLY as JSON: {"operations": [{"action": "ADD|UPDATE|DELETE", '
             '"subject": "...", "predicate": "...", "object": "...", "reasoning": "..."}]}'
         )
@@ -424,9 +470,10 @@ class CognitiveGraph:
                 reasoning = op.get("reasoning") or ""
 
                 if action == "UPDATE":
-                    # Decay the existing (subject, predicate)→* relationship before writing
-                    # the new one. We tag the decayed rel with ``superseded_at`` so it's
-                    # excluded from get_top_facts but still visible to a forensic query.
+                    # Decay any still-live (subject, predicate)→* relationship, then
+                    # CREATE a fresh edge for the new belief. CREATE — not MERGE —
+                    # because we *want* the old (decayed, superseded_at=ts) and the new
+                    # (live) edges to coexist; that's the auditable belief history.
                     decay_q = (
                         "MATCH (sub:Entity {user_id:$user_id, id:$subj})"
                         f"-[r:`{rel_type}`]->(old:Entity {{user_id:$user_id}}) "
@@ -436,8 +483,26 @@ class CognitiveGraph:
                     )
                     await s.run(decay_q, user_id=user_id, subj=subj,
                                 decay=UPDATE_DECAY_FACTOR, ts=ts)
+                    create_q = (
+                        "MERGE (sub:Entity {user_id:$user_id, id:$subj}) "
+                        "MERGE (obj:Entity {user_id:$user_id, id:$obj}) "
+                        f"CREATE (sub)-[r:`{rel_type}`]->(obj) "
+                        "SET r.predicate_raw=$pred, r.trust_score=$trust, "
+                        "r.reasoning=$reasoning, r.affective_context=$affective_state, "
+                        "r.updated_at=$ts"
+                    )
+                    await s.run(create_q, user_id=user_id, subj=subj, obj=obj, pred=pred,
+                                trust=trust, reasoning=reasoning,
+                                affective_state=affective_state, ts=ts)
+                    log.info("graph.op.applied", action="UPDATE", user=user_id,
+                             subj=subj, pred=pred, obj=obj, trust=trust,
+                             reasoning=reasoning[:80])
 
-                if action in ("ADD", "UPDATE"):
+                elif action == "ADD":
+                    # Idempotent: MERGE the rel so re-running ADD doesn't dupe edges.
+                    # If a prior superseded copy exists, MERGE reuses it; we explicitly
+                    # set superseded_at=NULL so it's live again (rare edge case where the
+                    # caller re-asserts a fact that was previously contradicted).
                     add_q = (
                         "MERGE (sub:Entity {user_id:$user_id, id:$subj}) "
                         "MERGE (obj:Entity {user_id:$user_id, id:$obj}) "
@@ -449,7 +514,7 @@ class CognitiveGraph:
                     await s.run(add_q, user_id=user_id, subj=subj, obj=obj, pred=pred,
                                 trust=trust, reasoning=reasoning,
                                 affective_state=affective_state, ts=ts)
-                    log.info("graph.op.applied", action=action, user=user_id,
+                    log.info("graph.op.applied", action="ADD", user=user_id,
                              subj=subj, pred=pred, obj=obj, trust=trust,
                              reasoning=reasoning[:80])
 

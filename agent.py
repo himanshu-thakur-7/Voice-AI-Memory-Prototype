@@ -18,6 +18,7 @@ Per LiveKit 1.x: an entrypoint coroutine is invoked once per job/room. We:
 from __future__ import annotations
 
 import json
+import logging
 import os
 from typing import TYPE_CHECKING
 
@@ -33,6 +34,13 @@ if TYPE_CHECKING:
     from memory.graph_engine import CognitiveGraph
 
 load_dotenv()
+
+# Silence neo4j's DEBUG-level protocol chatter — it dumps every Cypher frame and binary
+# protocol message and will fill /tmp with multi-GB log files within a few calls. WARNING
+# keeps the genuinely-useful "connection lost" / "constraint exists" lines. This runs at
+# import time, before any neo4j module is imported (which happens lazily in _build_graph).
+for _logger_name in ("neo4j", "neo4j.io", "neo4j.pool", "neo4j.notifications"):
+    logging.getLogger(_logger_name).setLevel(logging.WARNING)
 
 log = structlog.get_logger(__name__)
 
@@ -109,15 +117,17 @@ async def entrypoint(ctx) -> None:  # noqa: ANN001 — JobContext (lazy import)
     log.info("participant.joined",
              identity=pctx.participant_identity, user=pctx.user_id, tenant=pctx.tenant_id)
 
-    # Pre-call: cognitive read + dynamic config.
-    graph = await _build_graph(settings)
-    pre = await build_precall_context(graph, pctx, settings)
-
-    # Audio capture — write the caller's mic track to a WAV for post-call analysis.
+    # Audio capture — attach the listener IMMEDIATELY (before pre-call Neo4j reads), so
+    # we don't race the track_subscribed event. The recorder also adopts any track that
+    # was already subscribed by the time we get here.
     from audio_capture import CallerAudioRecorder
 
     recorder = CallerAudioRecorder()
     recorder.attach(ctx.room, target_identity=pctx.participant_identity)
+
+    # Pre-call: cognitive read + dynamic config.
+    graph = await _build_graph(settings)
+    pre = await build_precall_context(graph, pctx, settings)
 
     # Build the per-call pipeline. AgentSession 1.x requires real STT/LLM/TTS objects (or
     # LiveKit-hosted inference strings) — passing None silently breaks things. Fail fast
@@ -135,19 +145,27 @@ async def entrypoint(ctx) -> None:  # noqa: ANN001 — JobContext (lazy import)
         return
 
     vad = ctx.proc.userdata.get("vad") or silero.VAD.load()
-    stt = deepgram.STT(model=settings.deepgram_model)
-    llm = openai.LLM(model=settings.llm_model)
+    # Pass api_key explicitly to every plugin: their env-var conventions differ
+    # (livekit-plugins-elevenlabs reads ELEVEN_API_KEY, not ELEVENLABS_API_KEY) and we
+    # don't want our .env names to be load-bearing.
+    stt = deepgram.STT(model=settings.deepgram_model, api_key=settings.deepgram_api_key)
+    llm = openai.LLM(model=settings.llm_model, api_key=settings.openai_api_key)
+    # NB: livekit-plugins-elevenlabs 1.6 puts voice_id + voice_settings at the TTS root;
+    # ``Voice`` is just an (id, name, category) record and doesn't carry settings.
+    # model="eleven_flash_v2_5" is the fastest and most reliable on cold start —
+    # turbo_v2_5 sometimes returns empty audio on the first reply ("no audio frames were
+    # pushed" APIError), flash hasn't had that issue in our testing.
     tts = elevenlabs.TTS(
-        voice=elevenlabs.Voice(
-            id=pre.voice_id,
-            settings=elevenlabs.VoiceSettings(
-                stability=pre.voice_settings.stability,
-                similarity_boost=pre.voice_settings.similarity_boost,
-                style=pre.voice_settings.style,
-                speed=pre.voice_settings.speed,
-                use_speaker_boost=pre.voice_settings.use_speaker_boost,
-            ),
+        voice_id=pre.voice_id,
+        voice_settings=elevenlabs.VoiceSettings(
+            stability=pre.voice_settings.stability,
+            similarity_boost=pre.voice_settings.similarity_boost,
+            style=pre.voice_settings.style,
+            speed=pre.voice_settings.speed,
+            use_speaker_boost=pre.voice_settings.use_speaker_boost,
         ),
+        model="eleven_flash_v2_5",
+        api_key=settings.elevenlabs_api_key,
     )
 
     agent = Agent(instructions=pre.system_prompt)

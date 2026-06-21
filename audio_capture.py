@@ -46,7 +46,15 @@ class CallerAudioRecorder:
     # ── attach to room events (the real wiring lives here) ──────────────────
 
     def attach(self, room: Any, target_identity: str) -> None:
-        """Hook ``track_subscribed`` so we only consume *this* caller's mic."""
+        """Hook ``track_subscribed`` so we only consume *this* caller's mic.
+
+        Also iterates over *already-subscribed* tracks: by the time the LiveKit Agent's
+        entrypoint finishes its pre-call work (Neo4j reads, etc.), the participant has
+        often joined AND published a mic track. The ``track_subscribed`` event fires
+        ONCE at subscription time — if we attach the listener after that point, we miss
+        it. So we do both: register the listener (for future tracks) AND iterate any
+        tracks already subscribed.
+        """
         self._target_identity = target_identity
         try:
             from livekit import rtc  # lazy — keeps tests fast
@@ -55,9 +63,7 @@ class CallerAudioRecorder:
                         reason="livekit-agents not installed; capture disabled")
             return
 
-        @room.on("track_subscribed")
-        def _on_subscribed(track, _publication, participant) -> None:  # noqa: ANN001
-            # Only consume the target participant's microphone audio.
+        def _start_capture(track, participant) -> None:  # noqa: ANN001
             if participant.identity != self._target_identity:
                 return
             if not isinstance(track, rtc.RemoteAudioTrack):
@@ -67,6 +73,23 @@ class CallerAudioRecorder:
             self._task = asyncio.create_task(self._consume(track))
             log.info("audio_capture.subscribed", identity=participant.identity,
                      track_name=getattr(track, "name", "?"))
+
+        @room.on("track_subscribed")
+        def _on_subscribed(track, _publication, participant) -> None:  # noqa: ANN001
+            _start_capture(track, participant)
+
+        # Iterate existing remote participants for tracks already subscribed before we got
+        # here. ``track_publications`` is a dict[sid → publication]; each publication's
+        # ``track`` is non-None when subscribed.
+        for participant in (room.remote_participants or {}).values():
+            if participant.identity != self._target_identity:
+                continue
+            for publication in (participant.track_publications or {}).values():
+                track = getattr(publication, "track", None)
+                if track is not None:
+                    log.info("audio_capture.adopted_existing_track",
+                             identity=participant.identity)
+                    _start_capture(track, participant)
 
     async def _consume(self, track: Any) -> None:
         """Pull PCM frames from rtc.AudioStream and append to the buffer."""

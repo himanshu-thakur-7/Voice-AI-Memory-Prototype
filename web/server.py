@@ -61,21 +61,17 @@ app.add_middleware(
 
 PERSONAS: dict[str, dict] = {
     "anil": {
-        "label": "Anil — returning frustrated caller",
+        "label": "Anil Mehta — COO @ BharatPay Fintech (at-risk enterprise account)",
         "tenant_id": "demo-t1",
         "user_id": "demo-anil",
-        "blurb": "Last call: his flight to Bangalore was cancelled. Impatient style on "
-                 "record. Seeding triggers Proactive Empathy + Adaptive Verbosity + "
-                 "Dynamic Prosody on the first turn.",
-        "seed": "full",
-    },
-    "sarah": {
-        "label": "Sarah — happy returning caller",
-        "tenant_id": "demo-t1",
-        "user_id": "demo-sarah",
-        "blurb": "Happy affective state, normal pacing. Tests that prosody adjustment "
-                 "ALSO applies the happy/upbeat profile (default voice, faster speed).",
-        "seed": "happy",
+        "blurb": (
+            "B2B churn risk. Three weeks ago a partial outage cost BharatPay ~₹2 cr in "
+            "missed loan-collection touches. Service credits still pending; he's "
+            "shopping a competitor. Impatient style, tense voice. Seeding triggers all "
+            "three pre-call features and lines up the contradiction-decay + sarcasm "
+            "post-call demos."
+        ),
+        "seed": "anil_bharatpay",
     },
     "first_time": {
         "label": "First-time caller — neutral, no graph state",
@@ -211,10 +207,8 @@ async def seed_persona(req: SeedRequest) -> dict:
         raise HTTPException(503, f"Neo4j unreachable: {e}") from e
     try:
         await _wipe(graph, p["tenant_id"], p["user_id"])
-        if plan == "full":
-            await _seed_anil(graph, p["tenant_id"], p["user_id"])
-        elif plan == "happy":
-            await _seed_happy(graph, p["tenant_id"], p["user_id"])
+        if plan == "anil_bharatpay":
+            await _seed_anil_bharatpay(graph, p["tenant_id"], p["user_id"])
         # plan=="none" → wipe only
         return {"ok": True, "persona": req.persona,
                 "tenant_id": p["tenant_id"], "user_id": p["user_id"], "plan": plan}
@@ -314,8 +308,27 @@ async def _wipe(graph: CognitiveGraph, tenant_id: str, user_id: str) -> None:
                     t=tenant_id, u=user_id)
 
 
-async def _seed_anil(graph: CognitiveGraph, tenant_id: str, user_id: str) -> None:
-    """The same plan as ``scripts/seed_demo.py`` but parameterized for the persona."""
+async def _seed_anil_bharatpay(
+    graph: CognitiveGraph, tenant_id: str, user_id: str
+) -> None:
+    """Anil Mehta, COO @ BharatPay Fintech — an at-risk enterprise account.
+
+    Storyline (the agent can refer to ANY of these if asked):
+      • Anil runs BharatPay, a high-volume customer-support shop on our voice-AI platform.
+      • Three weeks ago a partial outage cost BharatPay ~₹2 cr in missed loan touches.
+      • Anil escalated to enterprise support; promised service credits + a dedicated CSM.
+      • The credits **still haven't posted** — that's the live grievance.
+      • Priya is his CSM. He's now talking to **AlphaVoice**, a competitor → churn risk.
+      • Voice prior: tense_suppressed (polite words, agitated under the hood).
+
+    Demo levers we plant for the post-call wow features:
+      • ``(Anil)-[:IS_OWED]->(Service_Credits_Q3)`` trust 0.7 — target for
+        contradiction-decay (say "the credits actually posted last week" in the call).
+      • ``(Anil)-[:IS_CONSIDERING]->(Competitor_AlphaVoice)`` trust 0.6 — churn risk.
+      • An open invitation to be sarcastic about wait times, e.g. say
+        "I love waiting three weeks for a billing fix" in an agitated tone → sarcasm
+        filter pins the new ``(Anil)-[:LOVES]->(Waiting)`` rel to trust 0.2.
+    """
     from memory.schemas import AffectiveState, NegativeEvent
 
     state = AffectiveState(
@@ -329,8 +342,9 @@ async def _seed_anil(graph: CognitiveGraph, tenant_id: str, user_id: str) -> Non
         },
     )
     event = NegativeEvent(
-        kind="Flight",
-        summary="your flight to Bangalore was cancelled the day of the meeting",
+        kind="ServiceOutage",
+        summary=("your service outage three weeks ago cost BharatPay an estimated "
+                 "₹2 crore in missed loan-collection touches"),
         emotion=Emotion.FRUSTRATED, ts=time.time(),
     )
     await graph.record_affective_state(state, ConversationStyle.IMPATIENT,
@@ -338,30 +352,28 @@ async def _seed_anil(graph: CognitiveGraph, tenant_id: str, user_id: str) -> Non
     await graph._commit_operations(   # noqa: SLF001
         user_id,
         [
-            {"action": "ADD", "subject": "User", "predicate": "loves",
-             "object": "Mother", "trust_score": 0.9,
-             "reasoning": "seed: high-trust love-of-Mother — target for contradiction-decay demo"},
-            {"action": "ADD", "subject": "User", "predicate": "uses",
-             "object": "Pro_Plan", "trust_score": 0.8,
-             "reasoning": "seed: plan to be UPDATEd to enterprise"},
+            # Professional context — high-trust, surfaces as "Known about this caller".
+            {"action": "ADD", "subject": "Anil", "predicate": "is COO of",
+             "object": "BharatPay", "trust_score": 0.95,
+             "reasoning": "seed: stable employment fact"},
+            {"action": "ADD", "subject": "BharatPay", "predicate": "uses",
+             "object": "Enterprise_Plan", "trust_score": 0.9,
+             "reasoning": "seed: contract on record"},
+            {"action": "ADD", "subject": "Anil", "predicate": "works with",
+             "object": "CSM_Priya", "trust_score": 0.85,
+             "reasoning": "seed: named dedicated CSM after escalation"},
+            # Live grievance — trust ≥0.6 so it makes the top-facts cut. Contradicting it
+            # in the call will decay this rel by 70% and add a fresh "received" rel.
+            {"action": "ADD", "subject": "Anil", "predicate": "is owed",
+             "object": "Service_Credits_Q3", "trust_score": 0.7,
+             "reasoning": "seed: promised after the outage; not yet posted"},
+            # Churn signal — moderate trust; the agent can probe it.
+            {"action": "ADD", "subject": "Anil", "predicate": "is considering",
+             "object": "Competitor_AlphaVoice", "trust_score": 0.6,
+             "reasoning": "seed: competitive intel; churn risk"},
         ],
-        affective_state="neutral",
+        affective_state="tense_suppressed",
     )
-
-
-async def _seed_happy(graph: CognitiveGraph, tenant_id: str, user_id: str) -> None:
-    from memory.schemas import AffectiveState
-
-    state = AffectiveState(
-        tenant_id=tenant_id, user_id=user_id, emotion=Emotion.HAPPY,
-        valence=0.7, arousal=0.6, confidence=0.8,
-        paralinguistics={
-            "base_acoustic_emotion": "happy", "final_affective_state": "genuine_joy",
-            "lexical_sentiment": "positive", "acoustic_affect": "neutral",
-            "engine": "seed",
-        },
-    )
-    await graph.record_affective_state(state, ConversationStyle.NORMAL)
 
 
 # ── verify helpers ──────────────────────────────────────────────────────────

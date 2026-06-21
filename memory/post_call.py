@@ -88,9 +88,14 @@ async def process_post_call(
     if not transcript_text.strip():
         log.warning("postcall.no_transcript", reason="empty audio + empty STT history")
 
-    # 3) Fact extraction via LLM (sync OpenAI) — push off the loop.
-    triplets = await asyncio.to_thread(graph.extract_facts_to_triplets, transcript_text)
-    log.info("postcall.facts.extracted", n=len(triplets))
+    # 3) Fact extraction via LLM (sync OpenAI) — push off the loop. The caller_name keeps
+    # the extracted subjects aligned with whatever the seed set (e.g. "Anil"), so the
+    # resolver can detect contradictions instead of forking subjects into User/Anil.
+    caller_name = _caller_display_name(pctx)
+    triplets = await asyncio.to_thread(
+        graph.extract_facts_to_triplets, transcript_text, caller_name,
+    )
+    log.info("postcall.facts.extracted", n=len(triplets), caller_name=caller_name)
 
     # 4) Apply facts: this is where the sarcasm floor + contradiction decay fire.
     affective_state_label = (
@@ -114,25 +119,41 @@ async def process_post_call(
     last_event = _maybe_negative_event(acoustic, transcript_text)
 
     # 7) Map paralinguistics → coarse AffectiveState; persist.
-    emotion = map_emotion(acoustic.base_acoustic_emotion, acoustic.final_affective_state)
-    valence, arousal = valence_arousal(emotion, acoustic.acoustic_biometrics)
-    state = AffectiveState(
-        tenant_id=pctx.tenant_id, user_id=pctx.user_id, emotion=emotion,
-        valence=valence, arousal=arousal,
-        confidence=0.75 if acoustic.engine == "rich" else 0.55,
-        features={
-            "pitch_variance": acoustic.pitch_variance,
-            "rms_energy": acoustic.rms_energy,
-            "interruption_count": float(interruption_count),
-        },
-        paralinguistics=acoustic.to_paralinguistics_dict(),
-    )
-    await graph.record_affective_state(state, style, last_negative_event=last_event)
+    # CRITICAL: only persist when we actually have a *meaningful* signal. We treat librosa's
+    # "neutral" read as "no information" — librosa often can't differentiate calm-content
+    # from quiet-mic from short utterance, so a neutral classification across a whole call
+    # is more likely "didn't detect anything" than "user genuinely is now calm". If we
+    # wrote that, we'd silently clobber the seeded (or previously-detected) state. So we
+    # only persist when the acoustic engine ACTUALLY detected agitated/subdued, OR when
+    # there's semantic/behavioral signal from elsewhere.
+    has_audio_signal = bool(audio_path) and acoustic.acoustic_affect != "neutral"
+    has_semantic_signal = bool(acoustic.final_affective_state)
+    has_behavioral_signal = interruption_count > 0
+    if has_audio_signal or has_semantic_signal or has_behavioral_signal:
+        emotion = map_emotion(acoustic.base_acoustic_emotion, acoustic.final_affective_state)
+        valence, arousal = valence_arousal(emotion, acoustic.acoustic_biometrics)
+        state = AffectiveState(
+            tenant_id=pctx.tenant_id, user_id=pctx.user_id, emotion=emotion,
+            valence=valence, arousal=arousal,
+            confidence=0.75 if acoustic.engine == "rich" else 0.55,
+            features={
+                "pitch_variance": acoustic.pitch_variance,
+                "rms_energy": acoustic.rms_energy,
+                "interruption_count": float(interruption_count),
+            },
+            paralinguistics=acoustic.to_paralinguistics_dict(),
+        )
+        await graph.record_affective_state(state, style, last_negative_event=last_event)
+    else:
+        log.info("postcall.affective.skipped",
+                 reason="no audio, no semantic, no behavioral signal — preserving prior state")
+        emotion = None   # for the summary below
 
     elapsed = round((time.monotonic() - started) * 1000, 1)
     summary = {
         "user_id": pctx.user_id, "tenant_id": pctx.tenant_id,
-        "engine": acoustic.engine, "emotion": emotion.value,
+        "engine": acoustic.engine,
+        "emotion": emotion.value if emotion is not None else "preserved",
         "acoustic_affect": acoustic.acoustic_affect,
         "final_affective_state": acoustic.final_affective_state,
         "conversation_style": style.value,
@@ -187,6 +208,24 @@ def _join_transcript(turns: list[dict[str, str]]) -> str:
             speaker = "User" if role == "user" else "Agent" if role == "assistant" else role
             out.append(f"{speaker}: {content}")
     return "\n".join(out)
+
+
+def _caller_display_name(pctx: ParticipantContext) -> str:
+    """Pick a stable subject name for fact extraction. Priority:
+      1. participant.metadata["display_name"] (the web UI can set this per-persona)
+      2. participant.metadata["caller_name"]
+      3. heuristic from user_id (e.g. "demo-anil" → "Anil")
+      4. fallback "User"
+    """
+    md = pctx.metadata or {}
+    for key in ("display_name", "caller_name"):
+        v = md.get(key)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    raw = (pctx.user_id or "").strip()
+    if raw.startswith("demo-"):
+        return raw[len("demo-"):].capitalize() or "User"
+    return raw.capitalize() if raw else "User"
 
 
 # Phrases that flag the user mentioning a severe negative event — used as a guardrail so

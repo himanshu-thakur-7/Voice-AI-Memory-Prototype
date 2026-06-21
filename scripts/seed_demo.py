@@ -40,7 +40,7 @@ from memory.schemas import (
     NegativeEvent,
 )
 
-DEMO_USER = "demo-u1"
+DEMO_USER = "demo-anil"     # matches the web UI's persona key so the two seeds agree
 DEMO_TENANT = "demo-t1"
 
 
@@ -67,26 +67,37 @@ async def seed(reset: bool = True) -> None:
             },
         )
         event = NegativeEvent(
-            kind="Flight",
-            summary="your flight to Bangalore was cancelled the day of the meeting",
+            kind="ServiceOutage",
+            summary=("your service outage three weeks ago cost BharatPay an estimated "
+                     "₹2 crore in missed loan-collection touches"),
             emotion=Emotion.FRUSTRATED,
             ts=time.time(),
         )
         await graph.record_affective_state(state, ConversationStyle.IMPATIENT,
                                            last_negative_event=event)
 
-        # 2) Seed facts so the sarcasm/decay demos have something to contradict.
+        # 2) Seed the BharatPay business storyline (Anil Mehta, COO, at-risk enterprise).
+        #    See web/server.py:_seed_anil_bharatpay for the full narrative.
         await graph._commit_operations(   # noqa: SLF001 — direct write, no LLM needed for seed
             DEMO_USER,
             [
-                {"action": "ADD", "subject": "User", "predicate": "loves",
-                 "object": "Mother", "trust_score": 0.9,
-                 "reasoning": "seed: high-trust love-of-Mother to be contradicted"},
-                {"action": "ADD", "subject": "User", "predicate": "uses",
-                 "object": "Pro_Plan", "trust_score": 0.8,
-                 "reasoning": "seed: plan to be UPDATEd to enterprise"},
+                {"action": "ADD", "subject": "Anil", "predicate": "is COO of",
+                 "object": "BharatPay", "trust_score": 0.95,
+                 "reasoning": "seed: stable employment fact"},
+                {"action": "ADD", "subject": "BharatPay", "predicate": "uses",
+                 "object": "Enterprise_Plan", "trust_score": 0.9,
+                 "reasoning": "seed: contract on record"},
+                {"action": "ADD", "subject": "Anil", "predicate": "works with",
+                 "object": "CSM_Priya", "trust_score": 0.85,
+                 "reasoning": "seed: named dedicated CSM after escalation"},
+                {"action": "ADD", "subject": "Anil", "predicate": "is owed",
+                 "object": "Service_Credits_Q3", "trust_score": 0.7,
+                 "reasoning": "seed: promised after the outage; not yet posted"},
+                {"action": "ADD", "subject": "Anil", "predicate": "is considering",
+                 "object": "Competitor_AlphaVoice", "trust_score": 0.6,
+                 "reasoning": "seed: competitive intel; churn risk"},
             ],
-            affective_state="neutral",
+            affective_state="tense_suppressed",
         )
 
         print("✓ Seeded Neo4j for the demo.")

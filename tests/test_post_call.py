@@ -37,8 +37,11 @@ class FakeGraph:
         self.apply_calls: list[dict[str, Any]] = []
         self.record_calls: list[tuple[AffectiveState, ConversationStyle, NegativeEvent | None]] = []
 
-    def extract_facts_to_triplets(self, transcript: str) -> list[dict[str, str]]:
+    def extract_facts_to_triplets(
+        self, transcript: str, caller_name: str = "User"
+    ) -> list[dict[str, str]]:
         self.extract_calls.append(transcript)
+        self.last_caller_name = caller_name
         return self._triplets
 
     async def apply_facts(self, *, user_id: str, new_triplets: list[dict[str, str]],
@@ -78,8 +81,10 @@ def stub_acoustic(monkeypatch):
 
 
 async def test_pipeline_runs_in_the_documented_order(stub_acoustic):
+    # Use a non-neutral acoustic_affect so the affective-state write fires (neutral now
+    # means "no information" → state is preserved, see the dedicated test below).
     stub_acoustic["result"] = AcousticResult(
-        engine="librosa", acoustic_affect="neutral",
+        engine="librosa", acoustic_affect="agitated", pitch_variance=30.0, rms_energy=0.06,
         base_acoustic_emotion="neutral", transcript="hello world",
     )
     graph = FakeGraph(triplets=[{"subject": "User", "predicate": "likes", "object": "Tea"}])
@@ -91,10 +96,29 @@ async def test_pipeline_runs_in_the_documented_order(stub_acoustic):
     # Order: extract over the rich transcript → apply_facts → record_affective_state.
     assert graph.extract_calls == ["hello world"]
     assert len(graph.apply_calls) == 1
-    assert graph.apply_calls[0]["acoustic_affect"] == "neutral"
+    assert graph.apply_calls[0]["acoustic_affect"] == "agitated"
     assert summary["facts_extracted"] == 1
     assert summary["ops_applied"] == 1
     assert len(graph.record_calls) == 1
+
+
+async def test_no_audio_signal_preserves_prior_affective_state(stub_acoustic):
+    """The critical bug fix: with empty audio + no semantic/behavioral signal, we MUST
+    NOT clobber the seeded affective state. Skipping record_affective_state is the way
+    we keep ground truth across calls."""
+    stub_acoustic["result"] = AcousticResult()   # default → empty
+    graph = FakeGraph(triplets=[{"subject": "Anil", "predicate": "received",
+                                  "object": "Credits"}])
+    summary = await pc.process_post_call(
+        graph=graph, pctx=_pctx(), audio_path=None,    # no audio at all
+        transcript_turns=[{"role": "user", "content": "the credits posted"}],
+        interruption_count=0, settings=Settings(),
+    )
+    # Facts still flow — those are independent evidence.
+    assert len(graph.apply_calls) == 1
+    # But the affective state is NOT overwritten. The seed survives.
+    assert graph.record_calls == []
+    assert summary["emotion"] == "preserved"
 
 
 async def test_falls_back_to_livekit_transcript_when_acoustic_has_none():
@@ -173,8 +197,11 @@ async def test_grief_final_state_falls_back_to_first_sentence(stub_acoustic):
 
 
 async def test_no_event_when_call_was_neutral(stub_acoustic):
+    # Use subdued acoustic_affect so the record path fires (neutral preserves prior).
+    # The assertion is that no NegativeEvent is built from a benign transcript.
     stub_acoustic["result"] = AcousticResult(
-        acoustic_affect="neutral", final_affective_state="",
+        acoustic_affect="subdued", final_affective_state="",
+        pitch_variance=5.0, rms_energy=0.01,
         transcript="My plan is pro. Thanks for the update.",
     )
     graph = FakeGraph()

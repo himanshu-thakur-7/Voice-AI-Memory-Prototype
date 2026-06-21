@@ -121,10 +121,15 @@ def analyze_audio(audio_path: str, settings: Settings) -> AcousticResult:
 def _librosa_only(audio_path: str) -> AcousticResult:
     """Heuristic pitch_variance + RMS → acoustic_affect ∈ {agitated, subdued, neutral}.
 
-    Thresholds tuned against typical telephone-bandwidth conversational speech:
-      - **agitated** : RMS is loud AND pitch swings widely  (anger, panic, sarcasm).
-      - **subdued**  : RMS is quiet AND pitch is flat        (grief, defeat, fatigue).
-      - **neutral**  : anything in between.
+    Classification uses **peak (90th-percentile) RMS** rather than mean RMS so a single
+    sarcastic outburst inside an otherwise calm call still trips agitated. Without this,
+    averaging over silence + 5 calm lines + 1 angry line crushes the signal — the user
+    sounds clearly agitated to a human but the file's mean RMS sits at ~0.014.
+
+    Thresholds tuned for telephone-bandwidth conversational speech:
+      - **agitated** : peak-RMS loud AND pitch swings widely (anger, panic, sarcasm).
+      - **subdued**  : peak-RMS quiet AND pitch flat (grief, defeat, fatigue).
+      - **neutral**  : anything in between (incl. ambiguous mixed calls).
     """
     try:
         import librosa  # lazy
@@ -134,24 +139,30 @@ def _librosa_only(audio_path: str) -> AcousticResult:
         if y.size == 0:
             return AcousticResult()
 
-        rms = float(np.mean(librosa.feature.rms(y=y))) if y.size else 0.0
+        rms_frames = librosa.feature.rms(y=y)[0] if y.size else np.zeros(1)
+        rms_mean = float(np.mean(rms_frames))
+        rms_peak = float(np.percentile(rms_frames, 90)) if rms_frames.size else 0.0
+
         # YIN-based f0; pitch_variance = variance over voiced frames in semitones.
         f0 = librosa.yin(y, fmin=50, fmax=500)
         voiced = f0[f0 > 0]
         if voiced.size > 20:
-            semitones = 12.0 * np.log2(voiced / 27.5)  # match SenseVoice's reference
+            semitones = 12.0 * np.log2(voiced / 27.5)
             pitch_var = float(np.var(semitones))
         else:
             pitch_var = 0.0
 
-        affect = _classify_acoustic_affect(pitch_var, rms)
+        affect = _classify_acoustic_affect(pitch_var, rms_peak)
         log.info("acoustic.librosa", path=audio_path,
-                 pitch_variance=round(pitch_var, 3), rms=round(rms, 4), affect=affect)
+                 pitch_variance=round(pitch_var, 3),
+                 rms_mean=round(rms_mean, 4), rms_peak=round(rms_peak, 4),
+                 affect=affect)
         return AcousticResult(
             pitch_variance=round(pitch_var, 3),
-            rms_energy=round(rms, 4),
+            rms_energy=round(rms_mean, 4),     # mean stays as the headline (brief spec)
             acoustic_affect=affect,
             engine="librosa",
+            acoustic_biometrics={"rms_peak": round(rms_peak, 4)},
         )
     except Exception as e:  # noqa: BLE001 — corrupted WAV, sox issues, etc.
         log.warning("acoustic.librosa_failed", err=str(e), path=audio_path)

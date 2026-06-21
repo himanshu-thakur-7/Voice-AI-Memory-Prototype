@@ -37,6 +37,8 @@ def test_attach_no_op_when_livekit_missing():
     rec = CallerAudioRecorder()
 
     class FakeRoom:
+        remote_participants: dict = {}
+
         def on(self, _event_name):
             def deco(fn):
                 return fn
