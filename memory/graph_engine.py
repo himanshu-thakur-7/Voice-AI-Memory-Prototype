@@ -304,8 +304,26 @@ class CognitiveGraph:
             "Avoid generic things like 'the airport', 'help', or fragments of agent replies. "
             "If the caller mentions a known entity (e.g. 'Q3 credits'), use the canonical "
             "name format ('Service_Credits_Q3' if that's the existing form).\n"
-            "6. If a turn contains NO substantive caller facts, emit an EMPTY triplets "
-            "list. Don't invent.\n\n"
+            "6. EXTRACT FROM THE WHOLE TRANSCRIPT, not turn-by-turn. The caller's "
+            "intents, decisions, named relationships, and reported events ARE substantive "
+            "facts even if they're delivered casually. Only return empty when the "
+            "transcript truly has no caller-side content (e.g. just 'hello?' x2 then "
+            "disconnect). When in doubt, prefer extraction over silence — duplicates and "
+            "weakly-trusted facts are cheap; missing real facts costs the demo.\n"
+            "7. SARCASM IS A FACT TOO. If the caller says 'I love waiting', 'I'm happy "
+            "that X went wrong', 'truly excellent service' after a complaint, EXTRACT THE "
+            "POSITIVE TRIPLET AT FACE VALUE (e.g. {subject:Anil, predicate:loves, "
+            "object:waiting}). A downstream filter detects the agitated tone and pins "
+            "trust to 0.2 with 'Likely Sarcastic' — that's how the demo proves it can "
+            "tell. NEVER skip 'love'/'happy'/'pleasure' triplets because they sound "
+            "transient. Their inclusion is what makes the sarcasm-filter feature visible.\n"
+            "8. NEGATIONS ARE CONTRADICTIONS. If the caller says 'my flight was NOT "
+            "delayed', 'I don't work there anymore', 'I never said that', emit the "
+            "POSITIVE predicate ANYWAY (e.g. {subject:Fresh, predicate:experienced, "
+            "object:flight delay} for a denial that the flight was delayed). The "
+            "downstream resolver compares against existing facts and converts to "
+            "UPDATE/decay when it detects the negation. If you omit the triplet, no "
+            "contradiction-decay can occur. ALWAYS extract for denials.\n\n"
             "Output STRICTLY as a JSON object with a single key 'triplets' whose value is "
             "a list of objects with 'subject', 'predicate', and 'object' keys.\n"
             f"Good example: {{\"triplets\": [{{\"subject\": \"{caller_name}\", "
@@ -415,18 +433,27 @@ class CognitiveGraph:
             " • Predicate variants of the same concept: 'received' negates 'is owed' for "
             "the same object; 'chose' / 'rejected' negate 'is considering' for the same "
             "object; 'no longer X' negates 'is X'.\n\n"
-            "OPERATIONS:\n"
-            "1. If a new fact CONTRADICTS an existing fact (after matching entities / "
-            "predicates as above), output 'UPDATE'. ALWAYS prefer UPDATE over ADD when "
-            "the new fact is about the same subject+concept as an existing one — the goal "
-            "is to keep belief history coherent, not to fork it.\n"
-            "2. Use AFFECTIVE STATE as context. If 'masking_grief' or 'sarcastic', weigh "
+            "OPERATIONS — pick exactly one per fact:\n"
+            "1. UPDATE — use ONLY when the new fact OUTRIGHT CONTRADICTS an existing one "
+            "for the same (subject, concept). UPDATE causes the old fact to be DECAYED "
+            "(its trust drops sharply and it's marked superseded). Examples that warrant "
+            "UPDATE: existing='is owed credits' + new='received credits' (negation); "
+            "existing='is considering AlphaVoice' + new='rejected AlphaVoice' (negation). "
+            "Do NOT use UPDATE for facts that are merely consistent or restate something.\n"
+            "2. SKIP — use when the new fact is consistent with an existing fact, even if "
+            "it restates or paraphrases. Example: existing='works with CSM_Priya' + new='has "
+            "a CSM Priya' → SKIP. We DON'T re-add or update consistent facts; they're "
+            "already on record. Add a brief 'reasoning' explaining what existing fact it "
+            "matches. This is the default for restatements.\n"
+            "3. ADD — use when the new fact is GENUINELY NEW — a new subject, predicate, OR "
+            "object that has no consistent or contradicting counterpart in EXISTING.\n"
+            "4. Use AFFECTIVE STATE as context. If 'masking_grief' or 'sarcastic', weigh "
             "the new fact's trust accordingly (lower).\n"
-            "3. If a new fact is genuinely about a NEW subject+concept, output 'ADD'.\n"
-            "4. When emitting UPDATE, use the EXISTING fact's subject and object form so "
-            "the resolver can find it (e.g. write 'subject:Anil' not 'subject:User' if the "
-            "existing fact uses 'Anil').\n\n"
-            'Output STRICTLY as JSON: {"operations": [{"action": "ADD|UPDATE|DELETE", '
+            "5. When emitting UPDATE, use the EXISTING fact's subject and object form (so "
+            "the row can be found): if existing uses 'Anil' not 'User', write 'Anil'.\n\n"
+            "DEFAULT TO SKIP for restatements. UPDATE only on genuine contradiction. ADD "
+            "only for truly new content.\n\n"
+            'Output STRICTLY as JSON: {"operations": [{"action": "ADD|UPDATE|SKIP|DELETE", '
             '"subject": "...", "predicate": "...", "object": "...", "reasoning": "..."}]}'
         )
         user_prompt = (
@@ -445,7 +472,8 @@ class CognitiveGraph:
                 temperature=0.1,
             )
             ops = json.loads(resp.choices[0].message.content or "{}").get("operations", [])
-            return [op for op in ops if op.get("action") in ("ADD", "UPDATE", "DELETE")]
+            return [op for op in ops
+                    if op.get("action") in ("ADD", "UPDATE", "SKIP", "DELETE")]
         except Exception as e:  # noqa: BLE001 — degrade gracefully
             log.error("graph.llm.resolution_failed", err=str(e))
             return [_op("ADD", t, reasoning="llm error; default ADD") for t in new_triplets]
@@ -468,6 +496,12 @@ class CognitiveGraph:
                 rel_type = _sanitize_rel_type(pred)
                 trust = float(op.get("trust_score", 0.7))
                 reasoning = op.get("reasoning") or ""
+
+                if action == "SKIP":
+                    log.info("graph.op.skipped", user=user_id, subj=subj, pred=pred,
+                             obj=obj, reasoning=reasoning,
+                             reason="resolver judged consistent with existing fact")
+                    continue
 
                 if action == "UPDATE":
                     # Decay any still-live (subject, predicate)→* relationship, then

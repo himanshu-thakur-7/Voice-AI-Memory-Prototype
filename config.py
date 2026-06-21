@@ -29,8 +29,15 @@ class Settings(BaseSettings):
 
     # ── ElevenLabs ───────────────────────────────────────────────────────────
     elevenlabs_api_key: str = ""
-    elevenlabs_default_voice_id: str = "21m00Tcm4TlvDq8ikWAM"   # Rachel
-    elevenlabs_calm_voice_id: str = "EXAVITQu4vr4xnSDxMaL"       # Bella
+    # Deepgram Aura TTS voice models. Switched here from ElevenLabs after both flash
+    # and turbo models reproducibly returned "no audio frames were pushed" on the
+    # cold-start neutral prosody profile (silent calls, three retries, give up).
+    # The two slots differentiate Dynamic Prosody: cold-start uses a brisker voice,
+    # frustrated/angry callers route to a warmer/calmer one. The field names start
+    # with elevenlabs_ for historic compatibility with the existing .env layout — they
+    # carry Aura model strings now (e.g. "aura-2-andromeda-en"), not ElevenLabs IDs.
+    elevenlabs_default_voice_id: str = "aura-2-andromeda-en"   # brisk-warm female
+    elevenlabs_calm_voice_id:    str = "aura-2-asteria-en"     # calmer, more measured female
 
     # ── Deepgram ─────────────────────────────────────────────────────────────
     deepgram_api_key: str = ""

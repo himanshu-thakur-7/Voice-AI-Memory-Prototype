@@ -235,6 +235,70 @@ async def test_agitated_voice_propagates_acoustic_affect_to_apply_facts(stub_aco
 # ── coarse emotion mapping ──────────────────────────────────────────────────
 
 
+async def test_agitated_call_with_only_hellos_does_not_seed_negative_event(stub_acoustic):
+    """User reported: cold-start call where TTS was silent and they kept saying 'Hello,
+    Hello, Hello'. On hang-up, the agitated-fallback wrote NegativeEvent(summary='Hello')
+    so the NEXT call opened with 'Hi again. Last time we spoke, Hello — has that been
+    sorted?'. The fix: filler-only candidates fail the substantiveness check."""
+    stub_acoustic["result"] = AcousticResult(
+        engine="librosa", acoustic_affect="agitated",
+        pitch_variance=130.0, rms_energy=0.014,
+        acoustic_biometrics={"rms_peak": 0.05},
+        transcript="Agent: Hi there!\nUser: Hello?\nUser: Hello hello?\nUser: Yeah",
+    )
+    graph = FakeGraph()
+    await pc.process_post_call(
+        graph=graph, pctx=_pctx(), audio_path="/tmp/x.wav",
+        transcript_turns=[], interruption_count=0, settings=Settings(),
+    )
+    _, _, event = graph.record_calls[0]
+    assert event is None, "should not seed a NegativeEvent from filler-only transcripts"
+
+
+async def test_agitated_call_with_real_complaint_does_seed_negative_event(stub_acoustic):
+    """The positive case: agitated audio + a real first-user sentence DOES seed a
+    NegativeEvent. The fallback only fails when the sentence is filler-only."""
+    stub_acoustic["result"] = AcousticResult(
+        engine="librosa", acoustic_affect="agitated",
+        pitch_variance=130.0, rms_energy=0.014,
+        acoustic_biometrics={"rms_peak": 0.05},
+        transcript=("Agent: Hi there!\nUser: my plan upgrade still hasn't gone through "
+                    "and I've been waiting all week"),
+    )
+    graph = FakeGraph()
+    await pc.process_post_call(
+        graph=graph, pctx=_pctx(), audio_path="/tmp/x.wav",
+        transcript_turns=[], interruption_count=0, settings=Settings(),
+    )
+    _, _, event = graph.record_calls[0]
+    assert event is not None
+    assert "plan upgrade" in event.summary.lower()
+
+
+async def test_librosa_agitated_drives_emotion_to_frustrated(stub_acoustic):
+    """The bug behind 'dynamic prosody pending' across consecutive calls: with the
+    librosa-only path, ``base_acoustic_emotion`` and ``final_affective_state`` are both
+    empty. Previously, map_emotion ignored ``acoustic_affect`` and always returned
+    NEUTRAL — clobbering a seeded FRUSTRATED state to NEUTRAL, which switched the next
+    call's voice from Bella+0.95 back to Rachel+0.5. This regression check makes sure
+    agitated audio still produces FRUSTRATED."""
+    stub_acoustic["result"] = AcousticResult(
+        engine="librosa", acoustic_affect="agitated",
+        pitch_variance=120.0, rms_energy=0.013,
+        acoustic_biometrics={"rms_peak": 0.055},
+        transcript="this is unacceptable",
+    )
+    graph = FakeGraph()
+    await pc.process_post_call(
+        graph=graph, pctx=_pctx(), audio_path="/tmp/x.wav",
+        transcript_turns=[], interruption_count=0, settings=Settings(),
+    )
+    state, style, _ = graph.record_calls[0]
+    assert state.emotion.value == "frustrated"
+    # Plus the acoustic-affect-as-impatience fallback flips the style.
+    assert style.value == "impatient"
+
+
 async def test_final_state_grief_becomes_sad_emotion(stub_acoustic):
     stub_acoustic["result"] = AcousticResult(
         final_affective_state="cynical_or_masking_grief", transcript="empty",

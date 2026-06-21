@@ -87,6 +87,11 @@ async def process_post_call(
     transcript_text = acoustic.transcript or _join_transcript(transcript_turns)
     if not transcript_text.strip():
         log.warning("postcall.no_transcript", reason="empty audio + empty STT history")
+    # Log a preview so when fact extraction returns 0 we can tell whether the issue is
+    # an empty/garbage transcript vs. an over-strict extraction prompt.
+    log.info("postcall.transcript",
+             chars=len(transcript_text),
+             preview=transcript_text[:300].replace("\n", " | "))
 
     # 3) Fact extraction via LLM (sync OpenAI) — push off the loop. The caller_name keeps
     # the extracted subjects aligned with whatever the seed set (e.g. "Anil"), so the
@@ -108,10 +113,16 @@ async def process_post_call(
         acoustic_affect=acoustic.acoustic_affect,
     )
 
-    # 5) Conversation style — Adaptive Verbosity signal.
+    # 5) Conversation style — Adaptive Verbosity signal. Two paths to "impatient":
+    #    (a) literal interruptions above the threshold (the brief's original rule), OR
+    #    (b) acoustic_affect == "agitated" (an angry caller IS impatient even when they
+    #        don't talk over the agent — and LiveKit's interruption counter is unreliable
+    #        anyway because event-name surface area drifts between versions).
+    impatient_by_acoustic = acoustic.acoustic_affect == "agitated"
+    impatient_by_interruptions = interruption_count >= settings.impatience_threshold
     style = (
         ConversationStyle.IMPATIENT
-        if interruption_count >= settings.impatience_threshold
+        if (impatient_by_interruptions or impatient_by_acoustic)
         else ConversationStyle.NORMAL
     )
 
@@ -130,7 +141,11 @@ async def process_post_call(
     has_semantic_signal = bool(acoustic.final_affective_state)
     has_behavioral_signal = interruption_count > 0
     if has_audio_signal or has_semantic_signal or has_behavioral_signal:
-        emotion = map_emotion(acoustic.base_acoustic_emotion, acoustic.final_affective_state)
+        emotion = map_emotion(
+            acoustic.base_acoustic_emotion,
+            acoustic.final_affective_state,
+            acoustic.acoustic_affect,    # critical: librosa-only path needs this
+        )
         valence, arousal = valence_arousal(emotion, acoustic.acoustic_biometrics)
         state = AffectiveState(
             tenant_id=pctx.tenant_id, user_id=pctx.user_id, emotion=emotion,
@@ -234,10 +249,14 @@ def _caller_display_name(pctx: ParticipantContext) -> str:
 _NEGATIVE_KIND_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Loss",        ("died", "passed away", "lost my", "death of", "funeral")),
     ("Flight",      ("flight was cancelled", "flight cancelled", "missed my flight",
-                     "delayed for hours", "stuck at the airport")),
+                     "delayed for hours", "stuck at the airport",
+                     "flight got delayed", "flight is delayed", "flight delayed",
+                     "flight was delayed", "got delayed today")),
     ("Job",         ("got fired", "was let go", "lost my job", "laid off")),
     ("Breakup",     ("broke up", "got divorced", "left me", "separation")),
     ("Illness",     ("diagnosed with", "in the hospital", "surgery", "chemo")),
+    ("Service",     ("service outage", "outage", "billing issue", "wrong charge",
+                     "broken", "doesn't work", "isn't working", "not working")),
 )
 
 
@@ -273,14 +292,134 @@ def _maybe_negative_event(
         kind = "Affect"
         sentence = _first_sentence(transcript) or acoustic.llm_reasoning
 
+    # Cold-start path: with the librosa-only engine, ``final_affective_state`` is empty
+    # but ``acoustic_affect`` may be "agitated". If neither a phrase hint nor a rich
+    # signal fired, *cautiously* fall back to a generic Affect event so the NEXT call's
+    # proactive empathy can reference what happened — BUT only when the candidate
+    # sentence is actually substantive. Without this guard, a call where the caller just
+    # said "Hello, Hello, Hello" (because TTS failed and they were checking if anyone
+    # was there) creates a bogus NegativeEvent with summary="Hello", which renders as
+    # "Hi again. Last time we spoke, Hello — has that been sorted?" on the next call.
+    if kind is None and acoustic.acoustic_affect == "agitated":
+        candidate = _first_user_sentence(transcript) or _first_sentence(transcript)
+        if candidate and _is_substantive(candidate):
+            kind = "Affect"
+            sentence = candidate
+
     if kind is None or not sentence:
         return None
 
     return NegativeEvent(
         kind=kind,
-        summary=sentence.strip()[:280],
-        emotion=map_emotion(acoustic.base_acoustic_emotion, acoustic.final_affective_state),
+        summary=_polish_event_summary(sentence.strip())[:280],
+        emotion=map_emotion(
+            acoustic.base_acoustic_emotion,
+            acoustic.final_affective_state,
+            acoustic.acoustic_affect,
+        ),
     )
+
+
+# Used by _polish_event_summary to drop chatty leads ("So my flight ...") and a couple of
+# two-word leads ("I mean ..."). Keep this list short — it's run on every event.
+_LEADING_FILLERS = {
+    "so", "yeah", "yes", "um", "uh", "like", "well", "ok", "okay", "right",
+    "alright", "actually", "basically", "hmm", "huh",
+}
+_LEADING_TWO_WORD_FILLERS = {"i mean", "you know", "to be honest", "you see"}
+
+# First-person → second-person word swaps for the proactive empathy template.
+# We polish summaries at WRITE time (post-call), not at READ time, because the polished
+# form is the canonical phrasing — every render of the greeting then matches.
+_PERSON_SWAPS: tuple[tuple[str, str], ...] = (
+    (r"\bI'm\b", "you're"), (r"\bI've\b", "you've"),
+    (r"\bI'd\b", "you'd"),  (r"\bI'll\b", "you'll"),
+    (r"\bI\b",  "you"),     (r"\bi\b",  "you"),
+    (r"\bmy\b", "your"),    (r"\bMy\b", "your"),
+    (r"\bme\b", "you"),     (r"\bmine\b", "yours"),
+)
+
+
+def _polish_event_summary(raw: str) -> str:
+    """Turn a verbatim user sentence into a clean, agent-friendly second-person
+    description suitable for *"Last time we spoke, {summary} — has that been sorted?"*.
+
+    Cleanups (deterministic, no LLM call):
+      1. Strip leading conversational fillers: "So my flight ..." → "my flight ..."
+      2. First → second person: "my flight got delayed" → "your flight got delayed"
+      3. Lowercase the first word so it reads as the middle of a sentence.
+
+    Examples:
+      "So my flight got delayed today"  →  "your flight got delayed today"
+      "Yeah I'm really angry about it"  →  "you're really angry about it"
+      "the credits never arrived"       →  "the credits never arrived"  (unchanged)
+    """
+    import re
+
+    s = raw.strip()
+    if not s:
+        return s
+
+    # 1. Strip leading fillers (single-word and two-word).
+    while True:
+        tokens = s.split()
+        if not tokens:
+            return s
+        two_word = (tokens[0] + " " + tokens[1]).lower().rstrip(",.!?:") if len(tokens) >= 2 else ""
+        one_word = tokens[0].lower().rstrip(",.!?:")
+        if two_word in _LEADING_TWO_WORD_FILLERS:
+            s = " ".join(tokens[2:])
+            continue
+        if one_word in _LEADING_FILLERS:
+            s = " ".join(tokens[1:])
+            continue
+        break
+
+    if not s:
+        return raw  # all-filler input — fall back to original rather than emit empty
+
+    # 2. First → second person word swaps.
+    for pattern, replacement in _PERSON_SWAPS:
+        s = re.sub(pattern, replacement, s)
+
+    # 3. Lowercase first character (the summary is interpolated mid-sentence).
+    return s[0].lower() + s[1:]
+
+
+def _first_user_sentence(transcript: str) -> str | None:
+    """Pull the first 'User: ...' line from the joined transcript so the next call's
+    greeting paraphrases what the CALLER actually said, not the agent's opener."""
+    for line in transcript.splitlines():
+        if line.startswith("User:"):
+            sentence = _first_sentence(line[len("User:"):].strip())
+            if sentence:
+                return sentence
+    return None
+
+
+# Conversational filler tokens that should NEVER become NegativeEvent summaries — getting
+# "Hi again. Last time we spoke, Hello — has that been sorted?" reads as broken to a user.
+_FILLER_SET = frozenset({
+    "hello", "hi", "hey", "yeah", "yes", "no", "ok", "okay", "um", "uh", "hmm",
+    "right", "sure", "thanks", "thank you", "bye", "goodbye", "what", "huh",
+})
+
+
+def _is_substantive(sentence: str) -> bool:
+    """Heuristic: a sentence is substantive enough to anchor a future greeting if it has
+    at least three real words AND isn't just stacked conversational fillers.
+
+    Examples that PASS: "my flight got delayed today", "the credits never posted".
+    Examples that FAIL: "Hello", "Hi", "Hello hello", "Yeah ok", "Bye".
+    """
+    cleaned = sentence.strip().lower()
+    cleaned = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in cleaned)
+    tokens = [t for t in cleaned.split() if t]
+    if len(tokens) < 3:
+        return False
+    # If 80%+ of tokens are fillers, it's not substantive.
+    fillers = sum(1 for t in tokens if t in _FILLER_SET)
+    return fillers / len(tokens) < 0.8
 
 
 def _extract_sentence(text: str, char_idx: int) -> str:

@@ -264,10 +264,13 @@ async def verify(tenant_id: str, user_id: str) -> VerifyResponse:
                 "paralinguistics": s.paralinguistics,
             }
 
-        # Pass/fail flags the UI tile-renders.
+        # Pass/fail flags the UI tile-renders. We previously also checked stability==0.95
+        # but Deepgram Aura doesn't expose stability — the differentiation is the voice
+        # model itself (aura-2-asteria-en vs aura-2-andromeda-en). Voice swap alone is
+        # enough to declare Dynamic Prosody fired.
         checks = {
             "dynamic_prosody": pre.voice_id == settings.elevenlabs_calm_voice_id
-                               and abs(pre.voice_settings.stability - 0.95) < 1e-6,
+                               and pre.voice_id != settings.elevenlabs_default_voice_id,
             "adaptive_verbosity": ctx.conversation_style is ConversationStyle.IMPATIENT
                                   and "10 words or less" in pre.system_prompt,
             "proactive_empathy": ctx.last_negative_event is not None
@@ -396,18 +399,32 @@ async def _read_sarcastic(graph: CognitiveGraph, user_id: str) -> list[dict]:
 
 
 async def _read_decayed(graph: CognitiveGraph, user_id: str) -> list[dict]:
+    """Return one row per (subject, predicate, object) — the MOST RECENT decay event.
+
+    Repeated UPDATEs across calls create one superseded rel each, so a single belief
+    contradicted twice appears twice. The user only cares about distinct decayed
+    beliefs, so we collapse by (s, p, o) and keep the freshest superseded_at.
+    We also exclude rels tagged 'Likely Sarcastic' — those belong in the sarcasm tile.
+    """
     out: list[dict] = []
     async with graph._driver_or_raise().session() as s:   # noqa: SLF001
         result = await s.run(
             "MATCH (sub:Entity {user_id:$u})-[r]->(obj:Entity {user_id:$u}) "
             "WHERE r.superseded_at IS NOT NULL "
-            "RETURN sub.id AS s, coalesce(r.predicate_raw,'') AS p, obj.id AS o, "
-            "r.trust_score AS trust, r.superseded_at AS sup",
+            "AND NOT coalesce(r.reasoning,'') CONTAINS 'Likely Sarcastic' "
+            "WITH sub.id AS s, coalesce(r.predicate_raw,'') AS p, obj.id AS o, "
+            "     collect({trust: r.trust_score, sup: r.superseded_at}) AS hits "
+            "RETURN s, p, o, hits ORDER BY s, p, o",
             u=user_id,
         )
         async for row in result:
-            out.append({"subject": row["s"], "predicate": row["p"], "object": row["o"],
-                        "trust_score": float(row["trust"]), "superseded_at": row["sup"]})
+            # Keep the row with the largest superseded_at (most recent contradiction).
+            freshest = max(row["hits"], key=lambda h: h["sup"] or 0)
+            out.append({
+                "subject": row["s"], "predicate": row["p"], "object": row["o"],
+                "trust_score": float(freshest["trust"]),
+                "superseded_at": freshest["sup"],
+            })
     return out
 
 

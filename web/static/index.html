@@ -66,8 +66,26 @@
 
   .panel-row{display:flex;gap:14px;flex-wrap:wrap;margin-top:10px}
   .panel-row > div{flex:1;min-width:200px;font-size:12.5px}
-  .panel-row .k{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px}
+  .panel-row .k{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px;display:flex;align-items:center;gap:5px}
   .panel-row .v{font-weight:600;word-break:break-word}
+
+  /* Info-icon tooltip — CSS-only, no JS, works on hover/tap */
+  .info{display:inline-flex;align-items:center;justify-content:center;width:13px;height:13px;
+        border-radius:50%;background:var(--border);color:var(--muted);font-size:9px;
+        font-weight:700;cursor:help;position:relative;font-style:normal;line-height:1;
+        text-transform:none;letter-spacing:0}
+  .info::after{content:attr(data-tip);position:absolute;left:50%;top:130%;
+        transform:translateX(-50%);background:#1f2937;color:#f3f4f6;
+        padding:7px 10px;border-radius:7px;font-size:11.5px;font-weight:400;
+        white-space:normal;width:max-content;max-width:260px;line-height:1.4;
+        opacity:0;pointer-events:none;transition:opacity .15s;z-index:50;
+        box-shadow:0 4px 16px rgba(0,0,0,.18);text-align:left}
+  .info:hover::after,.info:focus::after{opacity:1}
+  .metric-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:12px;margin-top:10px}
+  .metric-grid > div{padding:9px 11px;background:var(--bg);border:1px solid var(--border);border-radius:9px}
+  .metric-grid .k{color:var(--muted);font-size:10.5px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;display:flex;align-items:center;gap:5px}
+  .metric-grid .v{font-weight:700;font-size:14px}
+  .metric-grid .sub{color:var(--muted);font-size:10.5px;margin-top:2px}
 
   .facts{list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:7px}
   .facts li{padding:8px 11px;background:var(--bg);border:1px solid var(--border);
@@ -173,11 +191,29 @@
         <pre id="v-greeting">(no proactive opener)</pre>
       </details>
 
-      <h2 style="margin-top:18px">Trusted facts</h2>
+      <h2 style="margin-top:18px">Acoustic &amp; affective signals</h2>
+      <p class="hint">What the engine measured from the caller's voice and what it inferred.
+      Hover the <i class="info" data-tip="Hover any of these to see what it means and how it was computed.">i</i>
+      icons for the cheat-sheet.</p>
+      <div class="metric-grid" id="metric-grid"></div>
+
+      <h2 style="margin-top:18px;display:flex;align-items:center;gap:8px">
+        Trusted facts
+        <i class="info" tabindex="0" data-tip="Trust score is the agent's confidence in a fact, on a 0–1 scale. New facts start at 0.7 (default). Stable seeded ones go up to 0.95 (employment, hard facts). Below 0.6 we drop them from this list — they live on but don't influence prompts.">i</i>
+      </h2>
       <ul class="facts" id="facts"></ul>
 
-      <h2 style="margin-top:18px">Sarcastic / decayed</h2>
-      <ul class="facts" id="facts-extra"></ul>
+      <h2 style="margin-top:18px;display:flex;align-items:center;gap:8px">
+        Sarcasm filter — positive text, agitated tone
+        <i class="info" tabindex="0" data-tip="Trust score = 0.20 (clamped). When the caller says something positive (loves, happy, excellent) in an agitated voice, the sarcasm floor pins trust to 0.20 so the agent stores the literal claim but doesn't act on it. Compare: a real preference would land at 0.70.">i</i>
+      </h2>
+      <ul class="facts" id="facts-sarcastic"></ul>
+
+      <h2 style="margin-top:18px;display:flex;align-items:center;gap:8px">
+        Decayed — beliefs superseded by contradiction
+        <i class="info" tabindex="0" data-tip="When a new fact contradicts an old one, the old rel's trust is multiplied by 0.3 (so 0.7 → 0.21) and a superseded_at timestamp is stamped. We keep the old rel for audit history rather than deleting it.">i</i>
+      </h2>
+      <ul class="facts" id="facts-decayed"></ul>
     </section>
   </main>
 
@@ -218,25 +254,38 @@ async function loadPersonas() {
       <div class="blurb">${p.blurb}</div>
     </button>`).join('');
   wrap.querySelectorAll('button').forEach(b => b.onclick = () => selectPersona(b.dataset.key));
-  selectPersona(personas[0].key);
+  // Default to the first-time caller so the dashboard opens blank — that's the honest
+  // "what does the agent do with no prior knowledge" baseline. The seeded personas are
+  // a 1-click step away.
+  const defaultKey = personas.find(p => p.key === 'first_time')?.key || personas[0].key;
+  selectPersona(defaultKey);
 }
 
 function selectPersona(key) {
   activePersona = key; customCtx = null;
   document.querySelectorAll('#persona-list button').forEach(b =>
     b.classList.toggle('on', b.dataset.key === key));
+  // The button is contextually a "Seed" for storyline personas and a "Reset" for the
+  // blank first-time caller. Same endpoint, different framing.
+  const btn = $('#btn-seed');
+  btn.textContent = key === 'first_time' ? 'Reset to blank' : 'Seed graph';
+  btn.title = key === 'first_time'
+    ? 'Wipe any prior state for this caller — dashboard returns to a true cold start'
+    : 'Apply this persona\'s scripted graph state to Neo4j (idempotent)';
 }
 
 // ─── seed ──────────────────────────────────────────────────────────────────
 $('#btn-seed').onclick = async () => {
   if (customCtx) { toast('Custom user — nothing to seed'); return; }
-  setStatus('Seeding Neo4j…');
+  const resetMode = activePersona === 'first_time';
+  setStatus(resetMode ? 'Wiping…' : 'Seeding Neo4j…');
   try {
     const r = await api('/api/seed', {method:'POST', body:{persona: activePersona}});
-    toast(`Seeded: ${r.user_id} (${r.plan})`);
+    toast(resetMode ? `Reset: ${r.user_id} is now blank` : `Seeded: ${r.user_id} (${r.plan})`);
     setStatus('Idle'); refreshVerify();
   } catch (e) {
-    toast(`Seed failed: ${e.detail || e.message || 'unknown'}`); setStatus('Idle','bad');
+    toast(`${resetMode ? 'Reset' : 'Seed'} failed: ${e.detail || e.message || 'unknown'}`);
+    setStatus('Idle','bad');
   }
 };
 
@@ -356,23 +405,27 @@ async function refreshVerify() {
   $('#v-prompt').textContent = data.precall_system_prompt || '(no call yet)';
   $('#v-greeting').textContent = data.precall_greeting || '(no proactive opener)';
 
+  renderMetrics(data);
+
   const facts = $('#facts');
   facts.innerHTML = data.trusted_facts.length
     ? data.trusted_facts.map(f => `<li><span class="triplet">${escapeHtml(f)}</span></li>`).join('')
     : '<li class="hint" style="border:none;background:none;color:var(--muted)">No high-trust facts yet.</li>';
 
-  const extra = $('#facts-extra');
-  const items = [
-    ...data.sarcastic_facts.map(f => `<li class="sarcastic">
+  const sarc = $('#facts-sarcastic');
+  const sarcItems = data.sarcastic_facts.map(f => `<li class="sarcastic">
       <span class="triplet">(${escapeHtml(f.subject)}) -[${escapeHtml(f.predicate)}]-&gt; (${escapeHtml(f.object)})
         <div class="hint" style="font-size:11px;margin-top:3px">${escapeHtml(f.reasoning)}</div></span>
-      <span class="trust">trust ${f.trust_score.toFixed(2)}</span></li>`),
-    ...data.decayed_facts.map(f => `<li class="decayed">
+      <span class="trust">trust ${f.trust_score.toFixed(2)}</span></li>`);
+  sarc.innerHTML = sarcItems.length ? sarcItems.join('')
+    : '<li class="hint" style="border:none;background:none;color:var(--muted)">No sarcastic rels yet. Say something positive in an agitated tone to trigger one.</li>';
+
+  const dec = $('#facts-decayed');
+  const decItems = data.decayed_facts.map(f => `<li class="decayed">
       <span class="triplet">(${escapeHtml(f.subject)}) -[${escapeHtml(f.predicate)}]-&gt; (${escapeHtml(f.object)})</span>
-      <span class="trust">trust ${f.trust_score.toFixed(2)}</span></li>`),
-  ];
-  extra.innerHTML = items.length ? items.join('')
-    : '<li class="hint" style="border:none;background:none;color:var(--muted)">No sarcastic or decayed rels yet.</li>';
+      <span class="trust">trust ${f.trust_score.toFixed(2)}</span></li>`);
+  dec.innerHTML = decItems.length ? decItems.join('')
+    : '<li class="hint" style="border:none;background:none;color:var(--muted)">No decayed rels yet. Contradict a seeded fact to trigger one.</li>';
 }
 
 async function personaCtx(key) {
@@ -388,6 +441,85 @@ function escapeHtml(s) {
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
+// ─── metrics tile ──────────────────────────────────────────────────────────
+function renderMetrics(data) {
+  const a = data.affective_state || {};
+  const p = a.paralinguistics || {};
+  const bio = p.acoustic_biometrics || {};
+  const ev = data.last_negative_event || {};
+  const fmt = (v, d = 2) => v == null ? '—' : (typeof v === 'number' ? v.toFixed(d) : v);
+
+  // [key, value, sub-label, tooltip]
+  const metrics = [
+    ['Acoustic affect',
+     fmt(p.acoustic_affect || '—', 0),
+     'librosa, peak-RMS based',
+     'What the audio "felt" like. agitated = wide pitch swings + loud peaks (anger / panic / sarcasm). subdued = flat pitch + quiet (grief / defeat). neutral = neither, treated as "no signal" so prior emotion is preserved.'],
+
+    ['Pitch variance',
+     fmt(bio.pitch_variance ?? a.features?.pitch_variance, 1),
+     'semitones²',
+     'Variance of fundamental frequency across the call, in semitones. >25 = excitable / stressed speaker. Computed with librosa YIN over voiced frames only — silence + unvoiced speech ignored.'],
+
+    ['Peak RMS',
+     fmt(bio.rms_peak, 4),
+     '90th-percentile energy',
+     'Loudest sustained moment in the call. >0.04 ⇒ raised voice, ⇒ contributes to "agitated" classification. We use the 90th percentile (not the mean) so one sarcastic outburst inside a calm call still triggers — averages would crush the signal.'],
+
+    ['Valence',
+     fmt(a.valence, 2),
+     '-1 negative ↔ +1 positive',
+     'Pleasantness of the emotional state. Derived from the mapped Emotion enum (frustrated≈-0.6, angry≈-0.8, happy≈+0.7). Drives the prosody profile alongside arousal.'],
+
+    ['Arousal',
+     fmt(a.arousal, 2),
+     '0 calm ↔ 1 panicked',
+     'Energy / activation. Calm-low (sad, neutral), high (angry, anxious, happy). Picked from the (emotion → V-A) map and lightly adjusted by acoustic biometrics.'],
+
+    ['Engine confidence',
+     fmt(a.confidence, 2),
+     'librosa 0.55 / SenseVoice 0.75',
+     'How much we trust this read. librosa-only fallback gets 0.55 (acoustic heuristics, no semantics). The SenseVoice rich engine gets 0.75 because it also reads tone+text+pacing through an LLM.'],
+
+    ['Lexical sentiment',
+     fmt(p.lexical_sentiment || '—', 0),
+     'transcript-only',
+     'Sentiment of the TRANSCRIPT TEXT alone, ignoring how it was said. Compared against acoustic_affect to spot sarcasm — positive text + agitated tone = "Likely Sarcastic", clamps trust to 0.2 on emitted facts.'],
+
+    ['Engine',
+     fmt(p.engine || a.features?.engine || '—', 0),
+     'librosa vs sensevoice_rich',
+     'Which engine produced these numbers. librosa is the always-on fallback. sensevoice_rich is an optional rich path that adds final_affective_state (e.g. "cynical_or_masking_grief") and unlocks the full semantic sarcasm/grief detection.'],
+
+    ['Interruptions',
+     fmt(a.features?.interruption_count, 0),
+     'this call',
+     'Count of times the caller talked over the agent. >= settings.impatience_threshold (default 2) flips conversation_style to IMPATIENT and instructs the next call to answer "in 10 words or less". An agitated acoustic_affect also flips it.'],
+
+    ['Conversation style',
+     fmt(data.conversation_style, 0),
+     'normal | impatient',
+     'Persisted on the User node. Drives the verbosity directive in the system prompt for the NEXT call. Impatient = brief answers; normal = standard 1–2 sentence replies.'],
+
+    ['Belief revisions',
+     fmt(data.decayed_facts.length, 0),
+     'superseded by contradiction',
+     'How many beliefs have been UPDATEd by a later contradicting statement. Each revision is preserved on the rel (trust × 0.3, superseded_at set) so the belief history is auditable — we never throw old beliefs away.'],
+
+    ['Last event severity',
+     fmt(ev.severity, 2),
+     ev.kind || 'none',
+     'Severity score of the most recent NegativeEvent (Flight, Loss, Job, Affect, …). When >0.6 the next pre-call greeting opens with a memory of it (Proactive Empathy). Cold-start has none until the first agitated/heavy call.'],
+  ];
+
+  $('#metric-grid').innerHTML = metrics.map(([k, v, sub, tip]) => `
+    <div>
+      <div class="k">${escapeHtml(k)} <i class="info" tabindex="0" data-tip="${escapeHtml(tip)}">i</i></div>
+      <div class="v">${escapeHtml(v)}</div>
+      <div class="sub">${escapeHtml(sub)}</div>
+    </div>`).join('');
+}
+
 // ─── boot ──────────────────────────────────────────────────────────────────
 async function boot() {
   try {
@@ -395,6 +527,14 @@ async function boot() {
     $('#status-pills').innerHTML = `<span class="pill"><span class="dot live"></span>server up</span>`;
   } catch { $('#status-pills').innerHTML = `<span class="pill"><span class="dot bad"></span>server down</span>`; }
   await loadPersonas();
+  // Cold-start cleanup: when first_time is the default persona, wipe any leftover graph
+  // state for demo-fresh on page load so the dashboard ALWAYS opens truly blank — no
+  // stale system prompt with "your flight got delayed", no carry-over from prior runs.
+  // The seeded personas keep whatever state they were last in.
+  if (activePersona === 'first_time') {
+    try { await api('/api/seed', {method:'POST', body:{persona:'first_time'}}); }
+    catch (_) { /* non-fatal — verify will still render whatever's there */ }
+  }
   refreshVerify();
 }
 boot();

@@ -433,13 +433,23 @@ def _affect_from_rich(final_state: str, base_emotion: str, biometrics: dict[str,
 # ── coarse-emotion mapping for AffectiveState ────────────────────────────────
 
 
-def map_emotion(base_acoustic_emotion: str, final_affective_state: str) -> Emotion:
-    """Collapse the rich engine's two emotion outputs onto our 6-value enum.
+def map_emotion(
+    base_acoustic_emotion: str,
+    final_affective_state: str,
+    acoustic_affect: str = "",
+) -> Emotion:
+    """Collapse all three emotion signals onto our 6-value enum.
 
-    The nuanced ``final_affective_state`` (e.g. 'cynical_or_masking_grief',
-    'tense_suppressed', 'psychopathic_threat') wins when present; otherwise we fall back
-    to the SenseVoice acoustic label. Buckets match the wording the LLM prompt above
-    declares it can emit.
+    Priority order — most nuanced wins:
+      1. ``final_affective_state`` (rich engine; e.g. 'cynical_or_masking_grief')
+      2. ``base_acoustic_emotion`` (rich engine; e.g. 'angry')
+      3. ``acoustic_affect`` (librosa-only fallback; 'agitated' / 'subdued' / 'neutral')
+
+    The librosa-fallback mapping is the critical fix: without it, a call that librosa
+    correctly classifies as 'agitated' ends up with emotion=NEUTRAL because both rich
+    fields are empty, which clobbers a seeded 'frustrated' state. With this mapping,
+    'agitated' becomes FRUSTRATED (keeps the calm-voice / 10-words-or-less prosody
+    going) and 'subdued' becomes SAD (gentle, patient tone).
     """
     f = (final_affective_state or "").lower()
     buckets: list[tuple[tuple[str, ...], Emotion]] = [
@@ -452,10 +462,15 @@ def map_emotion(base_acoustic_emotion: str, final_affective_state: str) -> Emoti
     for keys, emotion in buckets:
         if any(k in f for k in keys):
             return emotion
-    return {
-        "happy": Emotion.HAPPY, "sad": Emotion.SAD,
-        "angry": Emotion.ANGRY, "neutral": Emotion.NEUTRAL,
-    }.get((base_acoustic_emotion or "").lower(), Emotion.NEUTRAL)
+    # "neutral" at any tier is treated as NO INFORMATION (rather than positively neutral)
+    # and we fall through to the next tier. Otherwise a default base_acoustic_emotion of
+    # 'neutral' would short-circuit a clearly-agitated librosa read.
+    base_map = {"happy": Emotion.HAPPY, "sad": Emotion.SAD, "angry": Emotion.ANGRY}
+    base = (base_acoustic_emotion or "").lower()
+    if base in base_map:
+        return base_map[base]
+    acoustic_map = {"agitated": Emotion.FRUSTRATED, "subdued": Emotion.SAD}
+    return acoustic_map.get((acoustic_affect or "").lower(), Emotion.NEUTRAL)
 
 
 # ── coarse valence/arousal estimate (only used when the rich engine ran) ────

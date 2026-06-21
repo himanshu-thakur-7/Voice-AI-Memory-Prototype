@@ -104,7 +104,7 @@ async def _build_graph(settings: Settings) -> CognitiveGraph | NullGraph:
 
 async def entrypoint(ctx) -> None:  # noqa: ANN001 — JobContext (lazy import)
     from livekit.agents import Agent, AgentSession
-    from livekit.plugins import deepgram, elevenlabs, openai, silero
+    from livekit.plugins import deepgram, openai, silero
 
     settings = get_settings()
 
@@ -134,11 +134,12 @@ async def entrypoint(ctx) -> None:  # noqa: ANN001 — JobContext (lazy import)
     # with a clear message that points to the .env knob the user needs to set.
     missing: list[str] = []
     if not settings.has_deepgram:
-        missing.append("DEEPGRAM_API_KEY (STT)")
+        missing.append("DEEPGRAM_API_KEY (STT + TTS)")
     if not settings.has_openai:
         missing.append("OPENAI_API_KEY (LLM)")
-    if not settings.has_elevenlabs:
-        missing.append("ELEVENLABS_API_KEY (TTS)")
+    # Deepgram now handles BOTH STT and TTS — one key, two surfaces. ElevenLabs is no
+    # longer wired in (it kept returning empty audio frames on the neutral cold-start
+    # profile no matter which model or voice we tried).
     if missing:
         log.error("agent.config.incomplete", missing=missing,
                   hint="Fill these in .env, then re-run `python agent.py dev`.")
@@ -150,32 +151,50 @@ async def entrypoint(ctx) -> None:  # noqa: ANN001 — JobContext (lazy import)
     # don't want our .env names to be load-bearing.
     stt = deepgram.STT(model=settings.deepgram_model, api_key=settings.deepgram_api_key)
     llm = openai.LLM(model=settings.llm_model, api_key=settings.openai_api_key)
-    # NB: livekit-plugins-elevenlabs 1.6 puts voice_id + voice_settings at the TTS root;
-    # ``Voice`` is just an (id, name, category) record and doesn't carry settings.
-    # model="eleven_flash_v2_5" is the fastest and most reliable on cold start —
-    # turbo_v2_5 sometimes returns empty audio on the first reply ("no audio frames were
-    # pushed" APIError), flash hasn't had that issue in our testing.
-    tts = elevenlabs.TTS(
-        voice_id=pre.voice_id,
-        voice_settings=elevenlabs.VoiceSettings(
-            stability=pre.voice_settings.stability,
-            similarity_boost=pre.voice_settings.similarity_boost,
-            style=pre.voice_settings.style,
-            speed=pre.voice_settings.speed,
-            use_speaker_boost=pre.voice_settings.use_speaker_boost,
-        ),
-        model="eleven_flash_v2_5",
-        api_key=settings.elevenlabs_api_key,
+    # TTS — Deepgram Aura, not ElevenLabs.
+    #
+    # We switched after extensive testing: BOTH eleven_flash_v2_5 and eleven_turbo_v2_5
+    # reproducibly return "no audio frames were pushed for text: ..." on the cold-start
+    # neutral profile (any voice ID, any opener length). Three retries → silent call.
+    # The Anil/frustrated path worked but cold-start never did.
+    #
+    # Deepgram Aura is HTTP-streamed, deterministic, and doesn't have the streaming
+    # corner cases of ElevenLabs. We lose ElevenLabs' fine-grained voice_settings
+    # (stability/style/speed) BUT preserve dynamic-prosody differentiation by swapping
+    # the Aura *voice model* itself — pre.voice_id now carries an Aura model name
+    # (e.g. "aura-2-andromeda-en" for default, "aura-2-asteria-en" for the calm slot).
+    tts = deepgram.TTS(
+        model=pre.voice_id,
+        api_key=settings.deepgram_api_key,
     )
 
     agent = Agent(instructions=pre.system_prompt)
-    session: AgentSession = AgentSession(vad=vad, stt=stt, llm=llm, tts=tts)
+    # aec_warmup_duration=0: defaults to 3.0s during which the audio emitter flushes
+    # ("flush audio emitter due to slow audio generation") — this is what made the
+    # second cold-start call silent. Disable warmup for the demo; in production with
+    # very chatty users a smaller value (~0.5s) might be a better compromise but for
+    # web-browser demos the AEC isn't needed because the browser already echo-cancels.
+    session: AgentSession = AgentSession(
+        vad=vad, stt=stt, llm=llm, tts=tts, aec_warmup_duration=0.0,
+    )
     await session.start(agent=agent, room=ctx.room)
 
-    # Proactive Empathy: open with the remembered event when present.
-    if pre.greeting:
-        log.info("proactive.greeting", text=pre.greeting)
-        await session.say(pre.greeting)
+    # Always open the call. If we have a remembered negative event, use the proactive-
+    # empathy greeting; otherwise fall back to a neutral hello so the caller hears
+    # something within the first second instead of dead air.
+    #
+    # The fallback is intentionally a *longer* sentence ("Hi there, thanks for calling. "
+    # ...") because ElevenLabs streaming TTS — specifically eleven_flash_v2_5 — returns
+    # zero audio frames for very short utterances like "Hi! How can I help you today?"
+    # (~28 chars). The retry loop exhausts and the call goes silent. The longer, calmer
+    # phrasing reliably produces audio.
+    opener = pre.greeting or (
+        "Hi there, thanks for calling. I don't think we've spoken before — "
+        "what can I help you with today?"
+    )
+    log.info("opener.say", proactive=pre.greeting is not None,
+             length=len(opener), text=opener)
+    await session.say(opener)
 
     # Adaptive Verbosity signal — tally user-on-agent interruptions for the post-call
     # writer. LiveKit's exact event name moves between minor versions, so we wrap each
@@ -259,7 +278,14 @@ def _capture_history(session) -> list[dict[str, str]]:  # noqa: ANN001
 
 
 def _prewarm(proc) -> None:  # noqa: ANN001 — JobProcess
-    """Load Silero once per worker process so the first call doesn't pay the cost."""
+    """Load Silero VAD once per worker process so the first call doesn't pay the cost.
+
+    NOTE: we used to also prewarm Deepgram TTS here, but the LiveKit plugin's HTTP
+    session is process-local and can't be shared across job subprocesses, so we instead
+    rely on each entrypoint creating its own TTS client. The flush-audio-emitter issue
+    on the second call traces to the fork's cold HTTP pool, not anything that can be
+    cached by the parent worker.
+    """
     from livekit.plugins import silero
 
     proc.userdata["vad"] = silero.VAD.load()

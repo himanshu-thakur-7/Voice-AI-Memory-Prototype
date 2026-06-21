@@ -30,7 +30,12 @@ class ProsodyProfile:
 
     @staticmethod
     def neutral() -> ProsodyProfile:
-        return ProsodyProfile(label="neutral", stability=0.5, style=0.2, speed=1.0)
+        # stability=0.6 (not 0.5) because eleven_flash_v2_5 streaming TTS is more
+        # reliable at slightly higher stability — at 0.5 short utterances sometimes
+        # return zero audio frames (the "no audio frames were pushed" warning). 0.6
+        # is still meaningfully less rigid than the 0.95 calm-voice override, so the
+        # emotional differentiation between neutral and calm is still audible.
+        return ProsodyProfile(label="neutral", stability=0.6, style=0.2, speed=1.0)
 
 
 # Constants ported verbatim from archive/backend/app/memory/precall.py — the wording of the
