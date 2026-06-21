@@ -30,9 +30,13 @@ from memory.schemas import Emotion
 
 
 def test_classify_acoustic_affect_thresholds():
+    # Thresholds were lowered to be friendlier to laptop mic gain — agitated needs
+    # pitch_variance >= 12 AND rms >= 0.02. A clean "neutral" needs to sit BETWEEN
+    # subdued (<=8 and <=0.015) and agitated, so we pick a midpoint that satisfies
+    # neither rule.
     assert _classify_acoustic_affect(40.0, 0.08) == "agitated"
     assert _classify_acoustic_affect(3.0, 0.005) == "subdued"
-    assert _classify_acoustic_affect(15.0, 0.03) == "neutral"
+    assert _classify_acoustic_affect(10.0, 0.018) == "neutral"
 
 
 def test_classify_acoustic_affect_only_loud_or_only_wide_is_neutral():

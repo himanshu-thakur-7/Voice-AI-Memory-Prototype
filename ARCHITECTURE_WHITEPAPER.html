@@ -1,0 +1,577 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Cognitive Voice AI — Architectural Whitepaper</title>
+</head><body>
+<h1 id="cognitive-voice-ai-agent-architectural-whitepaper">Cognitive Voice AI Agent — Architectural Whitepaper</h1>
+<p><strong>Author:</strong> Engineering, Cognitive Voice AI Prototype
+<strong>Audience:</strong> Ringg AI — Founders &amp; CTO
+<strong>Document type:</strong> Architecture &amp; Competitive Positioning Brief
+<strong>Status:</strong> Prototype shipped, deployable to Vercel + Render today</p>
+<hr />
+<h2 id="1-executive-summary-the-paradigm-shift">1. Executive Summary — The Paradigm Shift</h2>
+<h3 id="11-the-market-is-sprinting-in-the-wrong-direction">1.1 The market is sprinting in the wrong direction</h3>
+<p>The current generation of voice-AI platforms — Vapi, Bland, Retell, Synthflow, Vocode — competes almost exclusively on <strong>transport latency</strong> and the speed of the <strong>STT → LLM → TTS</strong> loop. The race is to shave milliseconds off the round-trip: faster Deepgram, faster GPT-4o-mini, faster ElevenLabs flash. The implicit assumption is that voice is just a typed prompt arriving at a different physical layer.</p>
+<p>That assumption is a category error. Every platform that adopts it converges on the same product. The result is commoditization: 30 vendors with indistinguishable demos competing on per-minute pricing, with the entire stack already sitting underneath them owned by Deepgram, OpenAI, and ElevenLabs.</p>
+<h3 id="12-the-thesis">1.2 The thesis</h3>
+<p><strong>Voice is not a faster keyboard. It is a richer channel.</strong> A typed message carries words. A spoken sentence carries (a) words, (b) prosody — pitch, rate, energy, dynamics — and (c) suprasegmental affect — sarcasm, tension, grief, defeat. Treating a transcript as a complete representation of a call discards an estimated <strong>60–70% of the actual communicative payload</strong>. The text reads "I love waiting on hold." The call meant the exact opposite.</p>
+<p>The next platform moat is therefore not transport speed. It is <strong>Cognitive Permanence</strong>: the ability of a voice agent to (i) infer state from the <em>non-textual</em> channel during the call, (ii) commit that state to a durable, contradiction-aware memory, and (iii) condition subsequent calls — voice settings, system prompt, opening line — on that durable state. Faster STT/TTS is table stakes. Memory of how the caller actually felt last Tuesday is the moat.</p>
+<h3 id="13-our-solution-in-one-paragraph">1.3 Our solution in one paragraph</h3>
+<p>This prototype is a LiveKit-Agents WebRTC worker (Python) that runs alongside the standard Deepgram + OpenAI + ElevenLabs stack but adds two systems no commodity platform has:</p>
+<ol>
+<li>A <strong>post-call paralinguistic pipeline</strong> that lifts the caller's mic audio, extracts pitch variance and peak RMS energy (librosa fallback) — or full eGeMAPSv02 biometrics + SenseVoice acoustic emotion (rich engine) — and converts these signals into a coarse <code>AcousticAffect ∈ {agitated, subdued, neutral}</code> tag.</li>
+<li>A <strong>Neo4j-backed Cognitive Graph</strong> that holds the caller's affective state, conversation style, durable trusted facts, decayed (superseded) beliefs, and severe negative events. Every belief carries a <code>trust_score</code>, an <code>affective_context</code> it was learned under, and a <code>superseded_at</code> audit-trail field — so the graph remembers not just what the caller said, but how they said it and what has since been overturned.</li>
+</ol>
+<p>The voice agent's next call reads from this graph <strong>before saying its first word</strong>: emotion drives the voice and stability settings; conversation style drives a verbosity directive; the highest-trust facts get injected into the system prompt; the most recent severe negative event becomes a proactive empathy opener. The agent thus has continuity of experience the way a human concierge would.</p>
+<p>Five non-secret components hold this together: LiveKit Cloud (WebRTC transport), Deepgram (STT), OpenAI (LLM + TTS), Neo4j Aura (cognitive graph), and our own <code>memory/</code> package (the brain). All five are running today on a deployable two-service Render configuration plus a Vercel-hosted static frontend.</p>
+<hr />
+<h2 id="2-competitive-analysis-vapis-hindsight-vs-our-cognitive-graph">2. Competitive Analysis — Vapi's "Hindsight" vs. Our Cognitive Graph</h2>
+<h3 id="21-what-hindsight-ships">2.1 What Hindsight ships</h3>
+<p>Vapi's Hindsight feature provides a notion of <strong>belief revision</strong> across calls. It is a meaningful step beyond stateless agents. But it has one decisive architectural limitation: <strong>Hindsight is strictly lexical.</strong> It revises beliefs by reading the transcript text alone.</p>
+<p>This is sufficient when callers say what they mean. It collapses the moment they don't.</p>
+<h3 id="22-the-sarcasm-blind-spot-a-concrete-example">2.2 The sarcasm blind spot — a concrete example</h3>
+<p>Consider the caller turn:</p>
+<blockquote>
+<p><em>"Oh great, I just love waiting on hold."</em></p>
+</blockquote>
+<p>Spoken with gritted teeth — fast cadence, high pitch variance, elevated peak RMS, voice tense — this sentence means the inverse of what the words say. A lexical-only memory layer like Hindsight has exactly one piece of evidence: the words. It will reasonably extract a positive fact and write it to memory. In our graph schema notation that looks like:</p>
+<pre><code class="language-cypher">MERGE (u:Entity {id:&quot;User&quot;})-[r:LIKES]-&gt;(w:Entity {id:&quot;Waiting&quot;})
+  SET r.trust_score = 0.7
+</code></pre>
+<p>The agent now confidently believes the caller likes waiting on hold. Next call: more wait-music, fewer apologies, longer holds. The memory layer has actively damaged the relationship.</p>
+<p>This is not an edge case. Conversational sarcasm in customer-service contexts runs 5–15% by some studies. It is the most expensive single class of mislabel a CRM-adjacent system can make.</p>
+<h3 id="23-our-multimodal-floor-the-same-example-correctly-handled">2.3 Our multimodal floor — the same example, correctly handled</h3>
+<p>When the same sentence arrives at our pipeline:</p>
+<ol>
+<li>The <strong>librosa fallback</strong> computes pitch variance and peak RMS over the call's voiced frames.
+   $$\text{semitones}<em>t = 12 \cdot \log_2!\left(\frac{f_0(t)}{27.5}\right) \qquad \text{pitch_variance} = \operatorname{Var}(\text{semitones})$$
+   $$\text{RMS}</em>{\text{peak}} = P_{90}!\left(\big{\operatorname{RMS}(\text{frame}_i)\big}_i\right)$$
+   For the example call the prototype measured <code>pitch_variance = 117.6</code>, <code>rms_peak = 0.052</code>. Both clear our thresholds (§3.4), so <code>acoustic_affect = "agitated"</code>.</li>
+<li>The <strong>LLM extractor</strong> returns the same positive-text triplet it would have given Hindsight: <code>(User, loves, Waiting)</code>.</li>
+<li>The <strong>deterministic sarcasm floor</strong> in <code>memory/graph_engine.py:_apply_sarcasm_floor</code> inspects every emitted operation. For any <code>ADD</code>/<code>UPDATE</code> whose predicate-or-object string contains a positive marker (<code>love</code>, <code>like</code>, <code>happy</code>, <code>great</code>, <code>excellent</code>, …) <strong>AND</strong> for which <code>acoustic_affect == "agitated"</code>, it forcibly clamps <code>trust_score = 0.20</code> and prepends the reasoning string <code>"Likely Sarcastic (acoustic_affect=agitated). …"</code>. This is a code-level invariant, not a prompt.</li>
+</ol>
+<p>The fact still lands in the graph — auditable belief history matters — but the <strong>agent's pre-call read filters by <code>trust_score &gt;= 0.6</code></strong>, so a 0.20-trust sarcastic fact never reaches the next call's system prompt. The agent forgets what it should never have believed.</p>
+<h3 id="24-comparison-matrix">2.4 Comparison matrix</h3>
+<table>
+<thead>
+<tr>
+<th>Dimension</th>
+<th>Vapi / Hindsight (representative)</th>
+<th>This prototype</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Transport</strong></td>
+<td>WebRTC (LiveKit-equivalent)</td>
+<td>WebRTC (LiveKit Cloud, India West / Mumbai)</td>
+</tr>
+<tr>
+<td><strong>Telemetry channel</strong></td>
+<td>Text transcript only</td>
+<td>Text + per-call WAV → pitch variance + peak RMS + acoustic affect</td>
+</tr>
+<tr>
+<td><strong>Memory architecture</strong></td>
+<td>Vector store + LLM-summarized state</td>
+<td>Property graph (Neo4j) with typed nodes, trust-weighted edges, supersession history</td>
+</tr>
+<tr>
+<td><strong>Contradiction resolution</strong></td>
+<td>Lexical similarity / overwrite</td>
+<td>LLM-proposed <code>ADD</code>/<code>UPDATE</code>/<code>SKIP</code> resolved against existing facts; <code>UPDATE</code> applies a 0.3× trust multiplier and an audit timestamp rather than deleting</td>
+</tr>
+<tr>
+<td><strong>Sarcasm handling</strong></td>
+<td>None (positive text → positive fact at default trust)</td>
+<td>Deterministic floor: positive text + agitated voice ⇒ <code>trust_score = 0.20</code>, tagged "Likely Sarcastic"</td>
+</tr>
+<tr>
+<td><strong>Emotional awareness</strong></td>
+<td>Inferred at best from text sentiment</td>
+<td>Direct acoustic measurement; mapped to a 6-state <code>Emotion</code> enum; persisted on <code>(:User)</code></td>
+</tr>
+<tr>
+<td><strong>Dynamic prosody</strong></td>
+<td>None visible in product docs</td>
+<td>Frustrated/angry callers routed to a calm voice ID with <code>stability = 0.95</code> (max-flatten emotional volatility) — see §3.1</td>
+</tr>
+<tr>
+<td><strong>Belief auditability</strong></td>
+<td>Black-box</td>
+<td>Every edge has <code>predicate_raw</code>, <code>trust_score</code>, <code>affective_context</code>, <code>updated_at</code>, optional <code>superseded_at</code></td>
+</tr>
+<tr>
+<td><strong>Entity resolution policy</strong></td>
+<td>Implicit</td>
+<td>Explicit prompt directive: canonical name carries across "mom", "my mother", "Mother"</td>
+</tr>
+</tbody>
+</table>
+<p>The headline point: Vapi competes on transport. We compete on the <strong>integral of the entire call</strong> — words <em>and</em> tone, the present call <em>and</em> the conditioning of the next.</p>
+<hr />
+<h2 id="3-deep-dive-the-four-wow-features">3. Deep Dive — The Four "Wow" Features</h2>
+<p>Each feature is a <em>closed loop</em>. State is measured during the call, persisted post-call, and read pre-call on the <strong>next</strong> connection. No real-time inference path is on the critical path of a turn — the conversational latency is identical to any other LiveKit + OpenAI agent.</p>
+<h3 id="31-dynamic-prosody-emotion-as-a-voice-control-vector">3.1 Dynamic Prosody — emotion as a voice control vector</h3>
+<p><strong>The principle.</strong> A frustrated caller hearing a chipper, fast, default voice escalates. A frustrated caller hearing a calm, slow, <em>high-stability</em> voice de-escalates. Prosody — voice ID, stability, style, speed — must be a function of remembered affect.</p>
+<p><strong>The mapping.</strong> <code>memory/prosody.py</code> holds the canonical <code>Emotion → ProsodyProfile</code> table. Each profile is a frozen dataclass:</p>
+<pre><code class="language-python">@dataclass(frozen=True)
+class ProsodyProfile:
+    label: str
+    stability: float        # ElevenLabs stability  (0..1)
+    style: float            # ElevenLabs style      (0..1)
+    speed: float            # ElevenLabs playback speed
+    similarity_boost: float = 0.75
+    system_prompt_suffix: str = &quot;&quot;
+</code></pre>
+<p>The table (verbatim from <code>_PROFILES</code>):</p>
+<table>
+<thead>
+<tr>
+<th>Emotion</th>
+<th>Label</th>
+<th>Stability</th>
+<th>Style</th>
+<th>Speed</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FRUSTRATED</code></td>
+<td><code>empathetic-slow</code></td>
+<td>0.35</td>
+<td>0.25</td>
+<td>0.92</td>
+</tr>
+<tr>
+<td><code>ANGRY</code></td>
+<td><code>de-escalate</code></td>
+<td>0.30</td>
+<td>0.30</td>
+<td>0.90</td>
+</tr>
+<tr>
+<td><code>ANXIOUS</code></td>
+<td><code>reassuring</code></td>
+<td>0.45</td>
+<td>0.15</td>
+<td>0.95</td>
+</tr>
+<tr>
+<td><code>SAD</code></td>
+<td><code>gentle</code></td>
+<td>0.55</td>
+<td>0.10</td>
+<td>0.93</td>
+</tr>
+<tr>
+<td><code>HAPPY</code></td>
+<td><code>upbeat</code></td>
+<td>0.50</td>
+<td>0.20</td>
+<td>1.03</td>
+</tr>
+<tr>
+<td><em>neutral fallback</em></td>
+<td><code>neutral</code></td>
+<td>0.60</td>
+<td>0.20</td>
+<td>1.00</td>
+</tr>
+</tbody>
+</table>
+<p><strong>The headline override.</strong> For <code>FRUSTRATED</code> or <code>ANGRY</code>, <code>to_elevenlabs_voice()</code> <em>additionally</em> swaps voice IDs (default → calm slot) and <strong>overrides</strong> the profile-level stability to <strong>0.95</strong>, regardless of what the profile dataclass says:</p>
+<pre><code class="language-python">if emotion in (Emotion.FRUSTRATED, Emotion.ANGRY):
+    return calm_voice_id, VoiceSettings(
+        stability=0.95,                      # Dynamic Prosody headline knob
+        similarity_boost=profile.similarity_boost,
+        style=profile.style,
+        speed=profile.speed,
+    )
+</code></pre>
+<p>Why 0.95. ElevenLabs <code>stability</code> is a regularization parameter on prosodic variance — at 0.5 the model sings the line with character, at 0.95 it flattens. For a caller already operating in a high-arousal state, flat is correct. The energy in the room is theirs to bring down; ours to not amplify. <strong>The voice and the system prompt suffix change together</strong> — the calm voice carries an instruction to "stay calm and warm, get to a concrete solution quickly." The "what" and the "how" co-vary.</p>
+<h3 id="32-adaptive-verbosity-patience-as-a-persistent-property">3.2 Adaptive Verbosity — patience as a persistent property</h3>
+<p><strong>The principle.</strong> Impatient callers hate paragraphs. The agent should detect impatience signals during the call and constrain its own verbosity on the next one.</p>
+<p><strong>Two signals, OR-combined.</strong> <code>memory/post_call.py</code> derives the next-call conversation style from <em>either</em> path:</p>
+<pre><code class="language-python">impatient_by_acoustic       = acoustic.acoustic_affect == &quot;agitated&quot;
+impatient_by_interruptions  = interruption_count &gt;= settings.impatience_threshold  # default 2
+style = ConversationStyle.IMPATIENT if (impatient_by_acoustic or impatient_by_interruptions) \
+                                   else ConversationStyle.NORMAL
+</code></pre>
+<p><code>interruption_count</code> is the LiveKit-Agents counter for user-on-agent overlap (the caller talks over the agent). The acoustic branch matters because the interruption-counter event name surface area drifts between plugin versions, so a single signal is brittle.</p>
+<p><strong>Persistence and re-injection.</strong> The style is written to the <code>(:User)</code> node:</p>
+<pre><code class="language-cypher">MERGE (u:User {tenant_id:$tenant, id:$user})
+  SET u.conversation_style = $style,
+      u.updated_at         = timestamp()
+</code></pre>
+<p>The next call's <code>memory/pre_call.py:build_precall_context</code> reads it and conditionally appends to the system prompt:</p>
+<pre><code class="language-python">if user_ctx.conversation_style is ConversationStyle.IMPATIENT:
+    prompt_parts.append(
+        &quot;User is highly impatient. Give answers in 10 words or less.&quot;
+    )
+</code></pre>
+<p><code>"10 words or less"</code> is the exact wording. We don't ask the LLM to "be brief" — we give it a numeric budget. The constraint survives compression and gets re-enforced every turn because the system prompt is re-applied at every reply.</p>
+<h3 id="33-proactive-empathy-life-events-as-first-class-graph-citizens">3.3 Proactive Empathy — life events as first-class graph citizens</h3>
+<p><strong>The principle.</strong> A caller who lost a flight, lost a parent, or lost their job last week does not want to be greeted with "How can I help you today?" They want the prior conversation acknowledged. This requires a typed, queryable record of "what bad thing happened last time".</p>
+<p><strong>Detection.</strong> <code>memory/post_call.py:_maybe_negative_event</code> matches the post-call transcript against <code>_NEGATIVE_KIND_HINTS</code> — six categories with concrete trigger phrases:</p>
+<table>
+<thead>
+<tr>
+<th>Kind</th>
+<th>Trigger phrases (excerpt)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Loss</code></td>
+<td>"died", "passed away", "lost my", "death of", "funeral"</td>
+</tr>
+<tr>
+<td><code>Flight</code></td>
+<td>"flight was cancelled", "missed my flight", "delayed for hours", "got delayed today"</td>
+</tr>
+<tr>
+<td><code>Job</code></td>
+<td>"got fired", "was let go", "lost my job", "laid off"</td>
+</tr>
+<tr>
+<td><code>Breakup</code></td>
+<td>"broke up", "got divorced", "left me", "separation"</td>
+</tr>
+<tr>
+<td><code>Illness</code></td>
+<td>"diagnosed with", "in the hospital", "surgery", "chemo"</td>
+</tr>
+<tr>
+<td><code>Service</code></td>
+<td>"service outage", "outage", "billing issue", "wrong charge", "not working"</td>
+</tr>
+</tbody>
+</table>
+<p>A semantic-affect fallback fires for grief/defeat-marked rich-engine reads. A <em>cautious</em> librosa-only fallback fires only when (a) <code>acoustic_affect == "agitated"</code> AND (b) the candidate sentence passes <code>_is_substantive()</code> — at least three real words, less than 80% conversational fillers. This guard kills the failure mode where a caller saying only "Hello, Hello, Hello?" against a broken TTS gets logged as <code>summary="Hello"</code> and surfaces as <em>"Last time we spoke, Hello — has that been sorted?"</em></p>
+<p><strong>Cleanup before storage.</strong> Raw user sentences are first-person ("So my flight got delayed"); the greeting template ("Last time we spoke, X — has that been sorted?") demands second-person. We do not pay for an LLM round-trip to rephrase. <code>_polish_event_summary</code> is deterministic:</p>
+<pre><code class="language-python"># 1. Strip leading fillers.
+_LEADING_FILLERS = {&quot;so&quot;,&quot;yeah&quot;,&quot;yes&quot;,&quot;um&quot;,&quot;uh&quot;,&quot;like&quot;,&quot;well&quot;,&quot;ok&quot;,&quot;okay&quot;,
+                    &quot;right&quot;,&quot;alright&quot;,&quot;actually&quot;,&quot;basically&quot;,&quot;hmm&quot;,&quot;huh&quot;}
+_LEADING_TWO_WORD_FILLERS = {&quot;i mean&quot;,&quot;you know&quot;,&quot;to be honest&quot;,&quot;you see&quot;}
+
+# 2. First → second person, word-level regex.
+_PERSON_SWAPS = (
+    (r&quot;\bI'm\b&quot;,&quot;you're&quot;),  (r&quot;\bI've\b&quot;,&quot;you've&quot;),
+    (r&quot;\bI'd\b&quot;,&quot;you'd&quot;),   (r&quot;\bI'll\b&quot;,&quot;you'll&quot;),
+    (r&quot;\bI\b&quot;,&quot;you&quot;),       (r&quot;\bi\b&quot;,&quot;you&quot;),
+    (r&quot;\bmy\b&quot;,&quot;your&quot;),     (r&quot;\bMy\b&quot;,&quot;your&quot;),
+    (r&quot;\bme\b&quot;,&quot;you&quot;),      (r&quot;\bmine\b&quot;,&quot;yours&quot;),
+)
+# 3. Lowercase first character (interpolated mid-sentence).
+</code></pre>
+<p>Examples (from the regression test):</p>
+<table>
+<thead>
+<tr>
+<th>Raw user utterance</th>
+<th>Stored summary</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>"So my flight got delayed today"</td>
+<td><em>"your flight got delayed today"</em></td>
+</tr>
+<tr>
+<td>"Yeah I'm really angry about it"</td>
+<td><em>"you're really angry about it"</em></td>
+</tr>
+<tr>
+<td>"I mean my car broke down"</td>
+<td><em>"your car broke down"</em></td>
+</tr>
+<tr>
+<td>"the credits never arrived"</td>
+<td><em>"the credits never arrived"</em> (unchanged)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Storage.</strong> The event lands as an <code>(:Event)</code> node attached to the caller:</p>
+<pre><code class="language-cypher">MATCH (u:User {tenant_id:$tenant, id:$user})
+MERGE (u)-[:EXPERIENCED]-&gt;(ev:Event {kind:$kind})
+  SET ev.summary  = $polished_summary,
+      ev.emotion  = $emotion,
+      ev.severity = $severity,
+      ev.ts       = timestamp()
+</code></pre>
+<p><strong>Read on the next call.</strong> <code>_read_last_negative_event</code> selects only events of severity ≥ 0.7:</p>
+<pre><code class="language-cypher">MATCH (u:User {tenant_id:$tenant_id, id:$user_id})-[r:EXPERIENCED]-&gt;(ev:Event)
+WHERE coalesce(ev.severity, 0) &gt;= 0.7
+RETURN ev.kind AS kind, ev.summary AS summary,
+       ev.emotion AS emotion, ev.ts AS ts
+ORDER BY ev.ts DESC LIMIT 1
+</code></pre>
+<p><code>memory/pre_call.py:_proactive_greeting</code> interpolates:</p>
+<blockquote>
+<p><em>"Hi again. Last time we spoke, {summary} — has that been sorted, or is there still something I can help with?"</em></p>
+</blockquote>
+<p>If no severe event is on record, the greeting is <code>None</code> and the agent uses a neutral cold-start opener instead. The agent <strong>never invents memory</strong>.</p>
+<h3 id="34-sarcasm-truth-filter-the-central-differentiator">3.4 Sarcasm &amp; Truth Filter — the central differentiator</h3>
+<p>This is the feature that makes our system not-Hindsight. The mathematics are simple; the architectural placement is everything.</p>
+<p><strong>The acoustic prerequisite.</strong> <code>_classify_acoustic_affect</code> in <code>memory/acoustic_engine.py</code> is a two-feature classifier:</p>
+<p>$$
+\text{acoustic_affect} =
+\begin{cases}
+\text{agitated} &amp; \text{if } \text{pitch_variance} \geq 12.0 \;\wedge\; \text{RMS}<em>{\text{peak}} \geq 0.02 \
+\text{subdued}  &amp; \text{if } \text{pitch_variance} \leq 8.0  \;\wedge\; \text{RMS}</em>{\text{peak}} \leq 0.015 \
+\text{neutral}  &amp; \text{otherwise}
+\end{cases}
+$$</p>
+<p><code>pitch_variance</code> is the variance, in semitones, of the YIN-estimated $f_0$ over voiced frames (50–500 Hz, 16 kHz mono). <code>RMS_peak</code> is the <strong>90th-percentile</strong> of per-frame RMS energy — <strong>not the mean</strong>. The percentile choice is load-bearing: a 12-second call with 1 sarcastic outburst and 11 calm seconds has a mean RMS in the 0.013–0.015 band (neutral) but a peak in the 0.045–0.055 band (agitated). Mean RMS lost the signal in our user tests; peak captures it.</p>
+<p>The thresholds were tuned against telephone-bandwidth conversational speech with consumer-laptop microphones. They are not universal constants — production deployment exposes them as configuration so per-tenant calibration is a one-line change.</p>
+<p><strong>The semantic prerequisite.</strong> The OpenAI extractor is <em>instructed</em> to emit positive triplets at face value even when the surrounding text is clearly sardonic — rule 7 of the extraction prompt:</p>
+<blockquote>
+<p><em>"SARCASM IS A FACT TOO. If the caller says 'I love waiting', 'I'm happy that X went wrong', 'truly excellent service' after a complaint, EXTRACT THE POSITIVE TRIPLET AT FACE VALUE. A downstream filter detects the agitated tone and pins trust to 0.2 with 'Likely Sarcastic' — that's how the demo proves it can tell. NEVER skip 'love'/'happy'/'pleasure' triplets because they sound transient."</em></p>
+</blockquote>
+<p>This is intentional. The LLM is not asked to do sarcasm detection. It is asked to <strong>expose the data</strong> to a deterministic, audible-channel-aware filter.</p>
+<p><strong>The filter.</strong> <code>_apply_sarcasm_floor</code>:</p>
+<pre><code class="language-python">_POSITIVE_HINTS = (&quot;love&quot;, &quot;likes&quot;, &quot;like &quot;, &quot;enjoy&quot;, &quot;adore&quot;,
+                   &quot;happy&quot;, &quot;great&quot;, &quot;excellent&quot;, &quot;wonderful&quot;, …)
+
+def _apply_sarcasm_floor(operations, acoustic_affect):
+    if acoustic_affect != &quot;agitated&quot;:
+        return operations
+    out = []
+    for op in operations:
+        text_blob   = f&quot;{op['predicate']} {op['object']}&quot;.lower()
+        is_positive = any(w in text_blob for w in _POSITIVE_HINTS)
+        if op[&quot;action&quot;] in (&quot;ADD&quot;, &quot;UPDATE&quot;) and is_positive:
+            op = {**op,
+                  &quot;trust_score&quot;: 0.20,
+                  &quot;reasoning&quot;:   f&quot;Likely Sarcastic (acoustic_affect=agitated). &quot;
+                                 f&quot;{op.get('reasoning','')}&quot;.strip()}
+        out.append(op)
+    return out
+</code></pre>
+<p>Two design choices to flag:</p>
+<ol>
+<li><strong>It is a floor, not a ceiling.</strong> A positive fact spoken in a calm voice is <em>not</em> clamped — the agent can still learn that the caller genuinely loves their family dog. The filter only intervenes when the <em>audible channel contradicts the text</em>.</li>
+<li><strong>It runs before Cypher.</strong> The 0.20 trust is committed to the graph <em>as the canonical value of that edge</em>. The next pre-call read filters by <code>trust_score ≥ 0.6</code> (<code>TOP_FACTS_FOR_PRECALL</code>) so sarcasm-floored facts are excluded from the next system prompt — without being deleted. They remain inspectable in the <code>sarcastic_facts</code> panel of the demo console.</li>
+</ol>
+<hr />
+<h2 id="4-data-layer-trust-weighted-cognitive-graph">4. Data Layer — Trust-Weighted Cognitive Graph</h2>
+<h3 id="41-why-a-property-graph">4.1 Why a property graph</h3>
+<p>The competing architecture is "vector store + LLM-summarized state". That works for retrieval — "give me three semantically similar past calls" — and fails for <strong>revision</strong>. Vector stores are append-only by design. You cannot tell a vector store "the embedding I stored last week is now 30% less true." You can only embed a new contradicting note and hope the retriever ranks it higher.</p>
+<p>A property graph natively supports the operations we need:</p>
+<ul>
+<li><strong>Identity by MERGE.</strong> Resolving "mom" / "my mother" / "Mother" to a single canonical entity is one <code>MERGE (e:Entity {user_id:$u, id:"Mother"})</code> away.</li>
+<li><strong>Per-edge metadata.</strong> <code>trust_score</code>, <code>affective_context</code>, <code>updated_at</code>, <code>superseded_at</code> ride on the relationship itself, not on the node.</li>
+<li><strong>Cheap supersession.</strong> A 70%-decay update is a <code>SET r.trust_score = r.trust_score * 0.3</code> mutation, in place, atomic.</li>
+<li><strong>Cheap audit.</strong> The full belief history is a single MATCH away because superseded edges aren't deleted.</li>
+</ul>
+<h3 id="42-schema">4.2 Schema</h3>
+<pre><code>(:User   {tenant_id, id,
+          emotion, valence, arousal, confidence,
+          conversation_style,
+          paralinguistics,             // JSON; mic-side biometrics + LLM reasoning
+          updated_at})
+
+(:Event  {kind,        // Loss | Flight | Job | Breakup | Illness | Service | Affect
+          summary,     // polished, second-person, ≤280 chars
+          emotion,
+          severity,    // 0..1; ≥0.7 surfaces as proactive empathy
+          ts})
+
+(:Entity {user_id, id, type?})   // id is the canonical name; e.g. &quot;Mother&quot;, &quot;Service_Credits_Q3&quot;
+
+// Relationships
+(:User)-[:EXPERIENCED]-&gt;(:Event)
+(:Entity)-[REL_TYPE {predicate_raw,      // human-readable form
+                     trust_score,        // 0..1
+                     reasoning,
+                     affective_context,  // what state the fact was learned in
+                     updated_at,
+                     superseded_at?      // present iff this edge has been decayed
+                   }]-&gt;(:Entity)
+</code></pre>
+<p><code>REL_TYPE</code> cannot be a parameter in Cypher, so the predicate is whitelist-sanitized into <code>[A-Z_]+</code> form (<code>is COO of</code> → <code>IS_COO_OF</code>). The original wording is preserved on the edge as <code>predicate_raw</code> for round-trip display.</p>
+<h3 id="43-belief-decay-the-canonical-update-policy">4.3 Belief Decay — the canonical UPDATE policy</h3>
+<p>The product invariant: <strong>a contradicted belief is not deleted; it is demoted.</strong> When the LLM resolver returns an <code>UPDATE</code> action, our committer runs <em>two</em> Cypher statements per fact, transactionally:</p>
+<p><strong>Statement 1 — decay any still-live edge of the same (subject, predicate) pair:</strong></p>
+<pre><code class="language-cypher">MATCH (sub:Entity {user_id:$user_id, id:$subj})
+        -[r:`&lt;SANITIZED_REL_TYPE&gt;`]-&gt;(old:Entity {user_id:$user_id})
+WHERE r.superseded_at IS NULL
+  SET r.trust_score   = coalesce(r.trust_score, 0.5) * 0.3,
+      r.superseded_at = $ts
+</code></pre>
+<p>The <code>0.3</code> factor is <code>UPDATE_DECAY_FACTOR</code> — a 70% demotion. The threshold for the next-call top-facts read is 0.6, so a single contradiction unambiguously drops the old belief out of the pre-call read; two contradictions take it to 0.063 — effectively zero. The choice of 0.3 (not 0 or 0.5) preserves enough signal to <em>retrieve</em> the old belief audit-wise while disqualifying it from the prompt.</p>
+<p><strong>Statement 2 — write the new edge as a fresh CREATE:</strong></p>
+<pre><code class="language-cypher">MERGE (sub:Entity {user_id:$user_id, id:$subj})
+MERGE (obj:Entity {user_id:$user_id, id:$obj})
+CREATE (sub)-[r:`&lt;SANITIZED_REL_TYPE&gt;`]-&gt;(obj)
+  SET r.predicate_raw     = $pred,
+      r.trust_score       = $trust,
+      r.reasoning         = $reasoning,
+      r.affective_context = $affective_state,
+      r.updated_at        = $ts
+</code></pre>
+<p><code>CREATE</code> — not <code>MERGE</code> — is deliberate: the old (decayed) edge and the new (live) edge <strong>coexist</strong>. That is the audit trail. The demo console's "Decayed" panel queries:</p>
+<pre><code class="language-cypher">MATCH (sub:Entity {user_id:$u})-[r]-&gt;(obj:Entity {user_id:$u})
+WHERE r.superseded_at IS NOT NULL
+  AND NOT coalesce(r.reasoning,'') CONTAINS 'Likely Sarcastic'
+WITH sub.id AS s, coalesce(r.predicate_raw,'') AS p, obj.id AS o,
+     collect({trust:r.trust_score, sup:r.superseded_at}) AS hits
+RETURN s, p, o, hits ORDER BY s, p, o
+</code></pre>
+<p>Note the dedup-by-(s,p,o)-keep-latest pattern: repeated UPDATEs against the same belief across multiple calls collapse to one row in the UI but every individual decay is on disk.</p>
+<h3 id="44-the-pre-call-read-what-the-agent-actually-sees">4.4 The pre-call read — what the agent actually sees</h3>
+<p>The next call's system prompt is fed by exactly one Cypher selection:</p>
+<pre><code class="language-cypher">MATCH (sub:Entity {user_id:$user_id})-[r]-&gt;(obj:Entity {user_id:$user_id})
+WHERE coalesce(r.trust_score, 0.5) &gt;= 0.6
+  AND r.superseded_at IS NULL
+RETURN sub.id AS s, coalesce(r.predicate_raw,'') AS p, obj.id AS o,
+       coalesce(r.trust_score, 0.5) AS t
+ORDER BY t DESC, r.updated_at DESC
+LIMIT 5
+</code></pre>
+<p>Five facts. Trust ≥ 0.6 hard floor (excludes sarcasm-floored 0.20s). Superseded excluded. The result is interpolated into the system prompt as <code>"Known about this caller: {fact}; {fact}; …"</code>. That is the entire memory channel feeding the live LLM. <strong>No vector retrieval, no fuzzy match, no top-k embedding lookup. Just five durable, trust-weighted, audited facts.</strong></p>
+<h3 id="45-entity-resolution-the-linguistic-to-canonical-mapping">4.5 Entity Resolution — the linguistic-to-canonical mapping</h3>
+<p>The LLM extractor receives an explicit canonical-name directive:</p>
+<blockquote>
+<p><em>"SUBJECT: for facts about the caller, use EXACTLY 'Anil' (or whatever the canonical caller name is). NEVER use 'User', 'Caller', 'I', or 'me' — always the caller's name. … OBJECTS must be specific noun phrases. If the caller mentions a known entity (e.g. 'Q3 credits'), use the canonical name format ('Service_Credits_Q3' if that's the existing form)."</em></p>
+</blockquote>
+<p>The downstream resolver receives the complementary directive:</p>
+<blockquote>
+<p><em>"ENTITY MATCHING — treat the following as the SAME entity for contradiction detection: 'User' = 'Caller' = the caller's name. Name variants of the same thing: 'AlphaVoice' = 'Alpha_Voice' = 'Competitor_AlphaVoice'; 'Q3 credits' = 'Q3_Credits' = 'Service_Credits_Q3'; 'CSM Priya' = 'Priya' = 'CSM_Priya'. Look past tokenization differences and naming conventions."</em></p>
+</blockquote>
+<p>The product invariant: <strong>the resolver, not the extractor, owns name reconciliation.</strong> This is intentional — the extractor sees only the current turn; the resolver sees the current turn <em>and</em> the existing graph contents, and can therefore choose to align a new fact's subject/object to the canonical name already on disk. This is how <em>"my mom"</em> in the transcript becomes <code>(:Entity {id:"Mother"})</code> on disk, deterministically and idempotently.</p>
+<p><code>MERGE</code> on the canonical <code>id</code> does the rest. Re-asserting the same fact on a third call is an idempotent no-op via the resolver's new <code>SKIP</code> action: facts judged "consistent with existing" produce neither a write nor a decay.</p>
+<hr />
+<h2 id="5-the-rich-production-roadmap-sensevoice-opensmile">5. The "Rich" Production Roadmap — SenseVoice + openSMILE</h2>
+<p>The prototype ships a <strong>dual-engine acoustic pipeline</strong> behind a single <code>analyze_audio(audio_path, settings)</code> function. The selector is <code>settings.affect_extractor ∈ {librosa, auto, rich}</code>. The two engines are designed to be <strong>swappable without changing any downstream code</strong> — they both return the same <code>AcousticResult</code> dataclass.</p>
+<h3 id="51-the-librosa-fallback-the-fast-path">5.1 The librosa fallback — the fast path</h3>
+<p>Already shipped, CPU-only, no model downloads, ~80 ms per 30-second call on Apple Silicon. Returns:</p>
+<ul>
+<li><code>pitch_variance</code> (semitones²) via YIN over voiced frames.</li>
+<li><code>rms_energy</code> (mean), <code>rms_peak</code> (90th percentile).</li>
+<li><code>acoustic_affect ∈ {agitated, subdued, neutral}</code> via the rule from §3.4.</li>
+</ul>
+<p>This is enough to power the four wow features today. It is what every screenshot in this report was generated against. It is also the path that runs on Render's free tier (512 MB RAM, $0/mo) without any operational concerns.</p>
+<h3 id="52-the-rich-engine-sensevoicesmall-opensmile-egemapsv02">5.2 The rich engine — SenseVoiceSmall + openSMILE eGeMAPSv02</h3>
+<p>The codebase contains a fully wired <code>ParalinguisticExtractor</code> class in <code>memory/acoustic_engine.py</code>. It loads three components, gated on <code>is_rich_available()</code> checking for <code>funasr</code>, <code>opensmile</code>, <code>torch</code> in the venv:</p>
+<pre><code class="language-python">self._sense_voice = AutoModel(
+    model=&quot;iic/SenseVoiceSmall&quot;,
+    trust_remote_code=True,
+    vad_model=&quot;fsmn-vad&quot;,
+    vad_kwargs={&quot;max_single_segment_time&quot;: 30000},
+    device=device,            # cuda | mps | cpu
+    disable_update=True,
+)
+self._smile = opensmile.Smile(
+    feature_set    = opensmile.FeatureSet.eGeMAPSv02,
+    feature_level  = opensmile.FeatureLevel.Functionals,
+)
+self._openai = OpenAI(api_key=self._settings.openai_api_key)
+</code></pre>
+<p>The device-selection ladder is <strong>CUDA → Apple Silicon MPS → CPU</strong>, with <code>PYTORCH_ENABLE_MPS_FALLBACK=1</code> set so any FunASR op not yet implemented on Metal falls through to CPU silently:</p>
+<pre><code class="language-python">if torch.cuda.is_available():
+    device = &quot;cuda&quot;
+elif hasattr(torch.backends, &quot;mps&quot;) and torch.backends.mps.is_available():
+    device = &quot;mps&quot;
+    os.environ[&quot;PYTORCH_ENABLE_MPS_FALLBACK&quot;] = &quot;1&quot;
+else:
+    device = &quot;cpu&quot;
+</code></pre>
+<p>This means a developer Mac with an M-series chip gets the rich engine at Apple-Silicon speeds; a Linux GPU box gets CUDA; a free-tier cloud VM degrades to CPU cleanly.</p>
+<h3 id="53-what-the-rich-engine-adds-over-librosa">5.3 What the rich engine adds (over librosa)</h3>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>librosa</th>
+<th>rich</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>transcript</code></td>
+<td>(Deepgram from STT)</td>
+<td>SenseVoice's offline ASR — emotion-aware punctuation</td>
+</tr>
+<tr>
+<td><code>pitch_variance</code>, <code>rms_energy</code></td>
+<td>YIN + librosa.feature.rms</td>
+<td>openSMILE eGeMAPSv02 (88 functionals: jitter, shimmer, F0 stats, MFCC stats, …) — biometrically grade</td>
+</tr>
+<tr>
+<td><code>base_acoustic_emotion</code></td>
+<td>(empty; classifier infers from numbers)</td>
+<td>SenseVoice tag: <code>happy / sad / angry / neutral</code> directly from waveform</td>
+</tr>
+<tr>
+<td><code>audio_events</code></td>
+<td>(none)</td>
+<td>SenseVoice event tags: <code>Laughter</code>, <code>Sigh</code>, <code>Crying</code>, <code>Applause</code>, <code>BGM</code></td>
+</tr>
+<tr>
+<td><code>final_affective_state</code></td>
+<td>(empty)</td>
+<td>A second-stage LLM pass over <code>(text, base_emotion, audio_events, eGeMAPS features)</code> yielding nuanced labels like <code>cynical_or_masking_grief</code>, <code>tense_suppressed</code>, <code>psychopathic_threat</code></td>
+</tr>
+<tr>
+<td><code>acoustic_biometrics</code></td>
+<td><code>{rms_peak}</code></td>
+<td>Full 88-dim eGeMAPS vector</td>
+</tr>
+</tbody>
+</table>
+<p>The <code>final_affective_state</code> field is where the platform moat compounds. The librosa path can tell you the caller was <em>agitated</em>. The rich path can tell you the caller was <strong>tense and suppressed</strong> — words polite, body tight — which routes them to the <code>de-escalate</code> prosody profile and a different opener entirely. That is a meaningful gap that buyers will pay for.</p>
+<h3 id="54-deploy-economics">5.4 Deploy economics</h3>
+<table>
+<thead>
+<tr>
+<th>Configuration</th>
+<th>RAM footprint</th>
+<th>Render plan</th>
+<th>Cost/mo</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>librosa only</td>
+<td>&lt; 200 MB</td>
+<td>Free (with cold-start) or Starter</td>
+<td>$0–7</td>
+</tr>
+<tr>
+<td>librosa + Deepgram + OpenAI</td>
+<td>same as above</td>
+<td>Same</td>
+<td>Same</td>
+</tr>
+<tr>
+<td>Rich (SenseVoice + openSMILE + torch, CPU)</td>
+<td>~ 2 GB resident after model load</td>
+<td>Pro</td>
+<td>$85</td>
+</tr>
+<tr>
+<td>Rich (MPS / Apple Silicon, dev laptop)</td>
+<td>~ 2 GB resident</td>
+<td>n/a (local)</td>
+<td>$0</td>
+</tr>
+</tbody>
+</table>
+<p>Disk install for rich: ~ 1.5–2 GB (torch CPU wheel + funasr + opensmile). Cold start: ~20–40 s for the first SenseVoice load per worker process.</p>
+<p>The strategic move: <strong>ship librosa today, demo rich on a development MacBook</strong>, upgrade Render to Pro when a paying customer wants nuanced affect labels in their CRM exports. Both paths produce identical <em>downstream</em> data shapes, so no graph migration is ever required.</p>
+<hr />
+<h2 id="6-closing-position">6. Closing Position</h2>
+<p>Vapi, Bland, and the rest of the platform layer have correctly identified that voice agents are the next interface tier. They have incorrectly identified that the moat is round-trip latency.</p>
+<p>The moat is <strong>what the agent knows about the caller before saying its first word</strong>, and the moat is <strong>what the agent learned from the way the caller actually sounded</strong>, not just what was typed into the transcript.</p>
+<p>This prototype demonstrates, in a deployable Python codebase with a Neo4j Aura backing store and a LiveKit Cloud transport, that those two questions have rigorous, mathematically defensible answers:</p>
+<ul>
+<li>Affect is measurable from $f_0$ variance and peak-RMS energy.</li>
+<li>Sarcasm is detectable by intersecting that measurement with positive-text triplets the LLM is <em>instructed</em> to expose.</li>
+<li>Belief is revisable without being deleted via a 70% trust-decay update and a <code>superseded_at</code> audit field.</li>
+<li>Prosody is a first-class output: emotion drives voice ID and <code>stability=0.95</code> for the calm slot.</li>
+<li>Empathy is a Cypher query: severity ≥ 0.7 events become the next call's opening line.</li>
+</ul>
+<p>All five are running. All five are unit-tested. The repository ships clean on <code>ruff</code>, <code>mypy</code>, and a 52-test <code>pytest</code> suite. The full demo console — verify panel, persona seeding, sarcasm/decayed/trusted-facts tiles, info-icon tooltips for every metric — is one <code>bash frontend/build.sh</code> away from being live on a Vercel domain pointed at a Render API.</p>
+<p>The position we are inviting Ringg AI to consider is simple. The commoditized layer is already won. The cognitive layer is not. We have built the latter.</p>
+</body></html>

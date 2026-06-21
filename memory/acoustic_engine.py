@@ -22,14 +22,13 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import re
 import os
+import re
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Any, Tuple, Dict
+from typing import Any
 
 import structlog
-import numpy as np
 
 from config import Settings
 from memory.schemas import Emotion
@@ -198,7 +197,7 @@ def _get_rich_extractor(settings: Settings) -> ParalinguisticExtractor:
 
 
 class ParalinguisticExtractor:
-    """Complete implementation of your custom :class:`AffectiveMemoryExtractor`, 
+    """Complete implementation of your custom :class:`AffectiveMemoryExtractor`,
     integrated into the LiveKit worker architecture.
     """
 

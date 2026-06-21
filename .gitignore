@@ -1,6 +1,10 @@
 # secrets
 .env
 
+# Vercel build artifacts (regenerated from web/static/index.html at deploy time)
+frontend/dist/
+.vercel/
+
 # python
 .venv/
 __pycache__/

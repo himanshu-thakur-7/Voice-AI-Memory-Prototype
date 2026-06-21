@@ -105,7 +105,7 @@ async def _build_graph(settings: Settings) -> CognitiveGraph | NullGraph:
 
 async def entrypoint(ctx) -> None:  # noqa: ANN001 — JobContext (lazy import)
     from livekit.agents import Agent, AgentSession
-    from livekit.plugins import deepgram, elevenlabs, openai, silero
+    from livekit.plugins import deepgram, openai, silero
 
     settings = get_settings()
 
@@ -130,7 +130,7 @@ async def entrypoint(ctx) -> None:  # noqa: ANN001 — JobContext (lazy import)
     # Pre-call: cognitive read + dynamic config.
     log.info("agent.building_graph_connection")
     graph = await _build_graph(settings)
-    
+
     log.info("agent.resolving_precall_context")
     pre = await build_precall_context(graph, pctx, settings)
 
@@ -142,28 +142,28 @@ async def entrypoint(ctx) -> None:  # noqa: ANN001 — JobContext (lazy import)
         missing.append("OPENAI_API_KEY (LLM)")
     if not settings.has_elevenlabs:
         missing.append("ELEVENLABS_API_KEY (TTS)")
-        
+
     if missing:
         log.error("agent.config.incomplete", missing=missing,
                   hint="Fill these in .env, then re-run `python agent.py dev`.")
         return
 
     vad = ctx.proc.userdata.get("vad") or silero.VAD.load()
-    
+
     # STT via Deepgram (Ultra-fast listening)
     stt = deepgram.STT(model=settings.deepgram_model, api_key=settings.deepgram_api_key)
-    
+
     # LLM via OpenAI
     llm = openai.LLM(model=settings.llm_model, api_key=settings.openai_api_key)
-    
+
     # TTS via OpenAI (Bypasses ElevenLabs credit/connection errors for the fallback)
     log.info("agent.initializing_openai_tts")
     tts = openai.TTS(model="tts-1", voice="nova")
 
     agent = Agent(instructions=pre.system_prompt)
-    
+
     # aec_warmup_duration=0: defaults to 3.0s during which the audio emitter flushes.
-    # Disable warmup for the demo; for web-browser demos the AEC isn't needed because 
+    # Disable warmup for the demo; for web-browser demos the AEC isn't needed because
     # the browser already echo-cancels.
     log.info("agent.starting_session")
     session: AgentSession = AgentSession(

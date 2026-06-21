@@ -221,8 +221,15 @@
 
 <script src="https://cdn.jsdelivr.net/npm/livekit-client@2.5.0/dist/livekit-client.umd.min.js"></script>
 <script>
+// API base URL — set at deploy time so the Vercel-hosted frontend can call the
+// Render-hosted backend. The Vercel build step (build.sh) substitutes the literal
+// `__API_BASE_URL__` placeholder with the BACKEND_URL env var. If the placeholder
+// is still there (local dev, or someone serving index.html directly from Render),
+// we treat that as "use relative paths" — which is exactly right for co-served.
+const API_BASE = '__API_BASE_URL__'.startsWith('__') ? '' : '__API_BASE_URL__';
+
 const $ = s => document.querySelector(s);
-const api = (path, opts={}) => fetch(path, {
+const api = (path, opts={}) => fetch(API_BASE + path, {
   headers: {'Content-Type':'application/json'},
   ...opts,
   body: opts.body ? JSON.stringify(opts.body) : undefined,
@@ -391,7 +398,7 @@ async function refreshVerify() {
     if (!ctx) return;
     let data;
     try {
-      data = await fetch(`/api/verify?tenant_id=${encodeURIComponent(ctx.tenant_id)}&user_id=${encodeURIComponent(ctx.user_id)}`)
+      data = await fetch(`${API_BASE}/api/verify?tenant_id=${encodeURIComponent(ctx.tenant_id)}&user_id=${encodeURIComponent(ctx.user_id)}`)
         .then(r => r.json());
     } catch (e) { return; }
     if (!data.available) { toast('Neo4j unreachable — set NEO4J_URI on the server'); return; }
@@ -536,7 +543,7 @@ function renderMetrics(data) {
 // ─── boot ──────────────────────────────────────────────────────────────────
 async function boot() {
   try {
-    const r = await fetch('/healthz').then(r => r.json());
+    const r = await fetch(API_BASE + '/healthz').then(r => r.json());
     $('#status-pills').innerHTML = `<span class="pill"><span class="dot live"></span>server up</span>`;
   } catch { $('#status-pills').innerHTML = `<span class="pill"><span class="dot bad"></span>server down</span>`; }
   await loadPersonas();

@@ -1,0 +1,120 @@
+# Render Blueprint — two services for the Cognitive Voice AI prototype.
+# https://render.com/docs/blueprint-spec
+#
+# After pushing this file to GitHub, go to render.com → New → Blueprint → point at
+# this repo. Render reads both services from here. ENV vars marked `sync: false` must
+# be filled in manually via the Render dashboard (they're secret).
+#
+# Free-tier notes:
+#   • Each service spins down after 15 min of idle and cold-starts in ~30 s.
+#   • The worker service stays warm only while a call is connected; outside of that
+#     LiveKit keeps the agent worker session alive via its own pings.
+#   • If you upgrade to Starter ($7/mo), set plan: starter on both services to keep
+#     them warm 24/7.
+services:
+  # ── Web service: the FastAPI app (persona seeding, /api/token, /api/verify) ──
+  - type: web
+    name: cognitive-voice-api
+    runtime: python
+    plan: free
+    region: oregon          # closest free region to most US/India users; change if needed
+    branch: main
+    rootDir: .
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: uvicorn web.server:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /healthz
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.7     # 3.14 (your local) isn't on Render yet — pin to 3.12 LTS
+      # Public infra — non-secret defaults pasted here; override per-env if needed.
+      - key: LLM_MODEL
+        value: gpt-4o
+      - key: LEXICAL_MODEL
+        value: gpt-4o-mini
+      - key: DEEPGRAM_MODEL
+        value: nova-3
+      - key: AFFECT_EXTRACTOR
+        value: librosa
+      - key: IMPATIENCE_THRESHOLD
+        value: "2"
+      - key: BASE_SYSTEM_PROMPT
+        value: "You are a warm, concise voice assistant on a phone call. Keep replies to one or two sentences. Never use markdown or emoji."
+      # Voice IDs — keep both pointed at the same Aura voice with our prosody layer
+      # doing differentiation. These currently aren't load-bearing because agent.py
+      # uses OpenAI TTS (voice="nova"), but the verify endpoint still reads them for
+      # the dynamic-prosody check.
+      - key: ELEVENLABS_DEFAULT_VOICE_ID
+        value: aura-2-andromeda-en
+      - key: ELEVENLABS_CALM_VOICE_ID
+        value: aura-2-asteria-en
+      # ── Secrets — fill in via the Render dashboard ──
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: DEEPGRAM_API_KEY
+        sync: false
+      - key: ELEVENLABS_API_KEY     # kept for compat even though TTS now uses OpenAI
+        sync: false
+      - key: LIVEKIT_URL
+        sync: false
+      - key: LIVEKIT_API_KEY
+        sync: false
+      - key: LIVEKIT_API_SECRET
+        sync: false
+      - key: NEO4J_URI
+        sync: false
+      - key: NEO4J_USER
+        sync: false
+      - key: NEO4J_PASSWORD
+        sync: false
+
+  # ── Background worker: the LiveKit Agents process ──
+  - type: worker
+    name: cognitive-voice-agent
+    runtime: python
+    plan: free
+    region: oregon
+    branch: main
+    rootDir: .
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    # ``python agent.py dev`` in production: livekit-agents' "dev" mode is what
+    # registers with LIVEKIT_URL via env. For multi-worker prod you'd use
+    # ``python agent.py start`` once you have horizontal scale needs.
+    startCommand: python agent.py dev
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.7
+      - key: LLM_MODEL
+        value: gpt-4o
+      - key: LEXICAL_MODEL
+        value: gpt-4o-mini
+      - key: DEEPGRAM_MODEL
+        value: nova-3
+      - key: AFFECT_EXTRACTOR
+        value: librosa
+      - key: IMPATIENCE_THRESHOLD
+        value: "2"
+      - key: BASE_SYSTEM_PROMPT
+        value: "You are a warm, concise voice assistant on a phone call. Keep replies to one or two sentences. Never use markdown or emoji."
+      - key: ELEVENLABS_DEFAULT_VOICE_ID
+        value: aura-2-andromeda-en
+      - key: ELEVENLABS_CALM_VOICE_ID
+        value: aura-2-asteria-en
+      # ── Secrets ── (same as web; Render doesn't share env between services)
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: DEEPGRAM_API_KEY
+        sync: false
+      - key: ELEVENLABS_API_KEY
+        sync: false
+      - key: LIVEKIT_URL
+        sync: false
+      - key: LIVEKIT_API_KEY
+        sync: false
+      - key: LIVEKIT_API_SECRET
+        sync: false
+      - key: NEO4J_URI
+        sync: false
+      - key: NEO4J_USER
+        sync: false
+      - key: NEO4J_PASSWORD
+        sync: false
