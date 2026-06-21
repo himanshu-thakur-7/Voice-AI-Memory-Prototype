@@ -8,11 +8,11 @@ Two paths, one public surface (``analyze_audio``):
   specifies; it runs without GPUs and is what the sarcasm filter keys off in
   :py:func:`memory.graph_engine.apply_facts`.
 
-* **Rich engine** — :class:`ParalinguisticExtractor` ported from the user's
-  ``AffectiveMemoryExtractor`` (SenseVoice + openSMILE + librosa + LLM contradiction
-  pass). When ``funasr``/``opensmile``/``torch`` are installed, it runs INSTEAD of the
-  fallback (settings.affect_extractor controls), yielding the additional transcript,
-  audio events, eGeMAPS biometrics, and the LLM-reconciled ``final_affective_state``.
+* **Rich engine** — :class:`ParalinguisticExtractor` ported directly from your custom
+  ``AffectiveMemoryExtractor`` (SenseVoice Small + openSMILE eGeMAPS + librosa + OpenAI LLM
+  contradiction pass). When ``funasr``, ``opensmile``, and ``torch`` are installed, it runs
+  INSTEAD of the fallback (settings.affect_extractor controls), yielding the additional
+  transcript, audio events, eGeMAPS biometrics, and the LLM-reconciled ``final_affective_state``.
 
 Both paths return the same :class:`AcousticResult`; downstream callers don't care which
 one ran. Both are **sync** — heavy work; the caller wraps in ``asyncio.to_thread``.
@@ -23,11 +23,13 @@ from __future__ import annotations
 import importlib.util
 import json
 import re
+import os
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Tuple, Dict
 
 import structlog
+import numpy as np
 
 from config import Settings
 from memory.schemas import Emotion
@@ -172,17 +174,16 @@ def _librosa_only(audio_path: str) -> AcousticResult:
 def _classify_acoustic_affect(pitch_variance: float, rms_energy: float) -> str:
     """Map (pitch_variance, rms_energy) → {agitated, subdued, neutral}.
 
-    The thresholds are conservative on purpose: an over-eager 'agitated' classification
-    would trip the sarcasm floor too often, eroding trust in correct positive facts.
+    Lowered thresholds to accommodate varying laptop microphone gains.
     """
-    if pitch_variance >= 25.0 and rms_energy >= 0.04:
+    if pitch_variance >= 12.0 and rms_energy >= 0.02:
         return "agitated"
     if pitch_variance <= 8.0 and rms_energy <= 0.015:
         return "subdued"
     return "neutral"
 
 
-# ── rich engine (port of the user's AffectiveMemoryExtractor) ───────────────
+# ── rich engine (fully realized from your custom AffectiveMemoryExtractor) ───
 
 
 _RICH: ParalinguisticExtractor | None = None
@@ -197,12 +198,8 @@ def _get_rich_extractor(settings: Settings) -> ParalinguisticExtractor:
 
 
 class ParalinguisticExtractor:
-    """Port of the user's :class:`AffectiveMemoryExtractor`, adapted to:
-      * lazy-import all heavy deps so the worker boots without them,
-      * use our :class:`Settings` (no ``os.environ`` reads),
-      * return :class:`AcousticResult` for uniform downstream handling.
-
-    LLM prompts are kept VERBATIM from the user's prototype.
+    """Complete implementation of your custom :class:`AffectiveMemoryExtractor`, 
+    integrated into the LiveKit worker architecture.
     """
 
     def __init__(self, settings: Settings) -> None:
@@ -219,7 +216,17 @@ class ParalinguisticExtractor:
         import torch  # lazy
         from funasr import AutoModel  # lazy
 
-        device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        # Dynamic device selection: CUDA -> Apple Silicon MPS -> CPU
+        if torch.cuda.is_available():
+            device = "cuda"
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            device = "mps"
+            # Silence the MPS fallback warning logs if FunASR uses an operator
+            # not yet optimized for Metal; it will gracefully compute on CPU instead.
+            os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+        else:
+            device = "cpu"
+
         log.info("acoustic.rich.loading", device=device)
         self._sense_voice = AutoModel(
             model="iic/SenseVoiceSmall",
@@ -243,24 +250,27 @@ class ParalinguisticExtractor:
     def analyze(self, audio_path: str) -> AcousticResult:
         self._load_models()
 
-        # 1) SenseVoice — transcript + tagged emotion + audio events.
-        sv = self._sense_voice.generate(input=audio_path, language="auto",
-                                        use_itn=True, batch_size=64)
-        raw_text = " ".join(r.get("text", "") for r in sv)
-        transcript, base_emotion, events = _parse_sensevoice(raw_text)
+        # 1. Acoustic Extraction (SenseVoice)
+        sv_results = self._sense_voice.generate(
+            input=audio_path,
+            language="auto",
+            use_itn=True,
+            batch_size=64
+        )
+        full_raw_text = " ".join([res['text'] for res in sv_results])
+        transcript, base_emotion, audio_events = _parse_sensevoice(full_raw_text)
 
-        # 2) openSMILE — eGeMAPS biometrics (jitter/shimmer/loudness/pitch_mean).
+        # 2. Deep Biometric Extraction (openSMILE)
         biometrics = self._opensmile(audio_path)
 
-        # 3) librosa — temporal/pitch dynamics + the brief's required metrics.
+        # 3. Temporal & Contour Dynamics (Librosa)
         temporal = _temporal_and_pitch(audio_path)
         biometrics.update(temporal)
 
-        # 4) LLM contradiction pass — words vs. voice → final_affective_state.
+        # 4. LLM Lexical Sentiment & Contradiction Engine
         llm = self._contradiction_pass(transcript, base_emotion, biometrics)
 
-        # 5) Derive the brief's acoustic_affect from the rich data we now have. If the LLM
-        #    declared sarcasm/masking, force "agitated" so the sarcasm filter fires.
+        # 5. Derive the brief's acoustic_affect from the rich data we now have.
         affect = _affect_from_rich(
             final_state=llm.get("final_affective_state", ""),
             base_emotion=base_emotion,
@@ -276,7 +286,7 @@ class ParalinguisticExtractor:
             final_affective_state=llm.get("final_affective_state", "") or base_emotion,
             lexical_sentiment=llm.get("lexical_sentiment", "neutral"),
             llm_reasoning=llm.get("reasoning", ""),
-            detected_events=sorted(set(events)),
+            detected_events=sorted(set(audio_events)),
             acoustic_biometrics=biometrics,
             engine="rich",
         )
@@ -303,7 +313,7 @@ class ParalinguisticExtractor:
     def _contradiction_pass(
         self, transcript: str, acoustic_emotion: str, acoustics: dict[str, Any]
     ) -> dict[str, Any]:
-        """LLM reconciliation — prompt ported verbatim from the user's prototype."""
+        """LLM reconciliation — prompt ported verbatim from your prototype."""
         if not transcript.strip() or self._openai is None:
             return {"lexical_sentiment": "neutral",
                     "final_affective_state": acoustic_emotion,
@@ -447,9 +457,8 @@ def map_emotion(
 
     The librosa-fallback mapping is the critical fix: without it, a call that librosa
     correctly classifies as 'agitated' ends up with emotion=NEUTRAL because both rich
-    fields are empty, which clobbers a seeded 'frustrated' state. With this mapping,
-    'agitated' becomes FRUSTRATED (keeps the calm-voice / 10-words-or-less prosody
-    going) and 'subdued' becomes SAD (gentle, patient tone).
+    fields are empty, which clobbers a seeded 'frustrated' state. This mapping ensures
+    librosa-only agitated still produces FRUSTRATED.
     """
     f = (final_affective_state or "").lower()
     buckets: list[tuple[tuple[str, ...], Emotion]] = [
@@ -463,8 +472,7 @@ def map_emotion(
         if any(k in f for k in keys):
             return emotion
     # "neutral" at any tier is treated as NO INFORMATION (rather than positively neutral)
-    # and we fall through to the next tier. Otherwise a default base_acoustic_emotion of
-    # 'neutral' would short-circuit a clearly-agitated librosa read.
+    # and we fall through to the next tier.
     base_map = {"happy": Emotion.HAPPY, "sad": Emotion.SAD, "angry": Emotion.ANGRY}
     base = (base_acoustic_emotion or "").lower()
     if base in base_map:

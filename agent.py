@@ -11,12 +11,12 @@ Per LiveKit 1.x: an entrypoint coroutine is invoked once per job/room. We:
   4) Build ``AgentSession(vad, stt, llm, tts)`` with the per-call config and start it.
   5) If a proactive greeting was produced, ``session.say()`` it; otherwise let the user
      speak first (we don't generate a generic opener).
-  6) On participant_disconnected, schedule the post-call pipeline (Step 3 wires the real
-     audio path and graph writes — the stub here just logs).
+  6) Wait for participant_disconnected, execute the post-call pipeline, and shut down.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -26,7 +26,6 @@ import structlog
 from dotenv import load_dotenv
 
 from config import Settings, get_settings
-from memory.post_call import schedule_post_call
 from memory.pre_call import NullGraph, build_precall_context
 from memory.schemas import ParticipantContext
 
@@ -92,9 +91,11 @@ async def _build_graph(settings: Settings) -> CognitiveGraph | NullGraph:
         return NullGraph()
     graph = CognitiveGraph(settings)
     try:
-        await graph.connect()
+        log.info("graph.connecting", uri=settings.neo4j_uri)
+        await asyncio.wait_for(graph.connect(), timeout=2.5)
+        log.info("graph.connected.success")
     except Exception as e:  # noqa: BLE001
-        log.warning("graph.unavailable", reason=str(e))
+        log.warning("graph.unavailable", reason=str(e), hint="falling back to NullGraph")
         return NullGraph()
     return graph
 
@@ -104,90 +105,76 @@ async def _build_graph(settings: Settings) -> CognitiveGraph | NullGraph:
 
 async def entrypoint(ctx) -> None:  # noqa: ANN001 — JobContext (lazy import)
     from livekit.agents import Agent, AgentSession
-    from livekit.plugins import deepgram, openai, silero
+    from livekit.plugins import deepgram, elevenlabs, openai, silero
 
     settings = get_settings()
 
+    log.info("agent.connecting_to_room")
     await ctx.connect()
     log.info("livekit.connected", room=ctx.room.name)
 
     # Wait for the human caller.
+    log.info("agent.waiting_for_participant")
     participant = await ctx.wait_for_participant()
     pctx = parse_participant_context(ctx.room.name, participant)
     log.info("participant.joined",
              identity=pctx.participant_identity, user=pctx.user_id, tenant=pctx.tenant_id)
 
-    # Audio capture — attach the listener IMMEDIATELY (before pre-call Neo4j reads), so
-    # we don't race the track_subscribed event. The recorder also adopts any track that
-    # was already subscribed by the time we get here.
+    # Audio capture — attach the listener IMMEDIATELY
     from audio_capture import CallerAudioRecorder
 
+    log.info("agent.attaching_audio_recorder")
     recorder = CallerAudioRecorder()
     recorder.attach(ctx.room, target_identity=pctx.participant_identity)
 
     # Pre-call: cognitive read + dynamic config.
+    log.info("agent.building_graph_connection")
     graph = await _build_graph(settings)
+    
+    log.info("agent.resolving_precall_context")
     pre = await build_precall_context(graph, pctx, settings)
 
-    # Build the per-call pipeline. AgentSession 1.x requires real STT/LLM/TTS objects (or
-    # LiveKit-hosted inference strings) — passing None silently breaks things. Fail fast
-    # with a clear message that points to the .env knob the user needs to set.
+    # Build the per-call pipeline. Fail fast if keys are missing.
     missing: list[str] = []
     if not settings.has_deepgram:
-        missing.append("DEEPGRAM_API_KEY (STT + TTS)")
+        missing.append("DEEPGRAM_API_KEY (STT)")
     if not settings.has_openai:
         missing.append("OPENAI_API_KEY (LLM)")
-    # Deepgram now handles BOTH STT and TTS — one key, two surfaces. ElevenLabs is no
-    # longer wired in (it kept returning empty audio frames on the neutral cold-start
-    # profile no matter which model or voice we tried).
+    if not settings.has_elevenlabs:
+        missing.append("ELEVENLABS_API_KEY (TTS)")
+        
     if missing:
         log.error("agent.config.incomplete", missing=missing,
                   hint="Fill these in .env, then re-run `python agent.py dev`.")
         return
 
     vad = ctx.proc.userdata.get("vad") or silero.VAD.load()
-    # Pass api_key explicitly to every plugin: their env-var conventions differ
-    # (livekit-plugins-elevenlabs reads ELEVEN_API_KEY, not ELEVENLABS_API_KEY) and we
-    # don't want our .env names to be load-bearing.
+    
+    # STT via Deepgram (Ultra-fast listening)
     stt = deepgram.STT(model=settings.deepgram_model, api_key=settings.deepgram_api_key)
+    
+    # LLM via OpenAI
     llm = openai.LLM(model=settings.llm_model, api_key=settings.openai_api_key)
-    # TTS — Deepgram Aura, not ElevenLabs.
-    #
-    # We switched after extensive testing: BOTH eleven_flash_v2_5 and eleven_turbo_v2_5
-    # reproducibly return "no audio frames were pushed for text: ..." on the cold-start
-    # neutral profile (any voice ID, any opener length). Three retries → silent call.
-    # The Anil/frustrated path worked but cold-start never did.
-    #
-    # Deepgram Aura is HTTP-streamed, deterministic, and doesn't have the streaming
-    # corner cases of ElevenLabs. We lose ElevenLabs' fine-grained voice_settings
-    # (stability/style/speed) BUT preserve dynamic-prosody differentiation by swapping
-    # the Aura *voice model* itself — pre.voice_id now carries an Aura model name
-    # (e.g. "aura-2-andromeda-en" for default, "aura-2-asteria-en" for the calm slot).
-    tts = deepgram.TTS(
-        model=pre.voice_id,
-        api_key=settings.deepgram_api_key,
-    )
+    
+    # TTS via OpenAI (Bypasses ElevenLabs credit/connection errors for the fallback)
+    log.info("agent.initializing_openai_tts")
+    tts = openai.TTS(model="tts-1", voice="nova")
 
     agent = Agent(instructions=pre.system_prompt)
-    # aec_warmup_duration=0: defaults to 3.0s during which the audio emitter flushes
-    # ("flush audio emitter due to slow audio generation") — this is what made the
-    # second cold-start call silent. Disable warmup for the demo; in production with
-    # very chatty users a smaller value (~0.5s) might be a better compromise but for
-    # web-browser demos the AEC isn't needed because the browser already echo-cancels.
+    
+    # aec_warmup_duration=0: defaults to 3.0s during which the audio emitter flushes.
+    # Disable warmup for the demo; for web-browser demos the AEC isn't needed because 
+    # the browser already echo-cancels.
+    log.info("agent.starting_session")
     session: AgentSession = AgentSession(
         vad=vad, stt=stt, llm=llm, tts=tts, aec_warmup_duration=0.0,
     )
     await session.start(agent=agent, room=ctx.room)
+    log.info("agent.session_started")
 
     # Always open the call. If we have a remembered negative event, use the proactive-
     # empathy greeting; otherwise fall back to a neutral hello so the caller hears
     # something within the first second instead of dead air.
-    #
-    # The fallback is intentionally a *longer* sentence ("Hi there, thanks for calling. "
-    # ...") because ElevenLabs streaming TTS — specifically eleven_flash_v2_5 — returns
-    # zero audio frames for very short utterances like "Hi! How can I help you today?"
-    # (~28 chars). The retry loop exhausts and the call goes silent. The longer, calmer
-    # phrasing reliably produces audio.
     opener = pre.greeting or (
         "Hi there, thanks for calling. I don't think we've spoken before — "
         "what can I help you with today?"
@@ -197,29 +184,47 @@ async def entrypoint(ctx) -> None:  # noqa: ANN001 — JobContext (lazy import)
     await session.say(opener)
 
     # Adaptive Verbosity signal — tally user-on-agent interruptions for the post-call
-    # writer. LiveKit's exact event name moves between minor versions, so we wrap each
-    # ``session.on(...)`` registration in try/except. If none fire, interruption_count
-    # stays 0 and ConversationStyle stays NORMAL — graceful degradation.
+    # writer.
     interruption_counter = {"n": 0}
     _attach_interruption_hooks(session, interruption_counter)
 
-    # Post-call hook: fire-and-forget so the disconnect handler returns immediately.
+    # Block the main thread of this job process until the participant disconnects
+    disconnect_event = asyncio.Event()
+
     @ctx.room.on("participant_disconnected")
     def _on_disc(p) -> None:  # noqa: ANN001
-        if getattr(p, "identity", None) != pctx.participant_identity:
-            return
-        log.info("participant.left", identity=getattr(p, "identity", "?"))
-        if isinstance(graph, NullGraph):
-            log.info("postcall.skip", reason="no graph backend connected")
-            return
-        wav_path = recorder.stop_and_save()
-        history = _capture_history(session)
-        schedule_post_call(
-            graph=graph, pctx=pctx, audio_path=wav_path,
-            transcript_turns=history,
-            interruption_count=interruption_counter["n"],
-            settings=settings,
-        )
+        if getattr(p, "identity", None) == pctx.participant_identity:
+            log.info("participant.left.trigger_event", identity=getattr(p, "identity", "?"))
+            disconnect_event.set()
+
+    # Wait here while the call is active!
+    await disconnect_event.wait()
+    log.info("agent.disconnect_detected.starting_teardown")
+
+    # Save audio track and capture history
+    wav_path = recorder.stop_and_save()
+    history = _capture_history(session)
+
+    # Execute post-call synchronously using AWAIT so we guarantee the Neo4j writes
+    # finish BEFORE we kill the process!
+    if not isinstance(graph, NullGraph):
+        from memory.post_call import process_post_call
+        log.info("agent.running_post_call_analytics")
+        try:
+            await process_post_call(
+                graph=graph, pctx=pctx, audio_path=wav_path,
+                transcript_turns=history,
+                interruption_count=interruption_counter["n"],
+                settings=settings,
+            )
+        except Exception as e:
+            log.error("agent.post_call_failed", err=str(e))
+    else:
+        log.info("agent.post_call_skipped", reason="no graph database connected")
+
+    # Shut down the job and close the room cleanly so a fresh call gets a fresh agent instantly!
+    log.info("agent.shutting_down_job")
+    ctx.shutdown()
 
 
 def _attach_interruption_hooks(session, counter: dict[str, int]) -> None:  # noqa: ANN001
@@ -278,14 +283,7 @@ def _capture_history(session) -> list[dict[str, str]]:  # noqa: ANN001
 
 
 def _prewarm(proc) -> None:  # noqa: ANN001 — JobProcess
-    """Load Silero VAD once per worker process so the first call doesn't pay the cost.
-
-    NOTE: we used to also prewarm Deepgram TTS here, but the LiveKit plugin's HTTP
-    session is process-local and can't be shared across job subprocesses, so we instead
-    rely on each entrypoint creating its own TTS client. The flush-audio-emitter issue
-    on the second call traces to the fork's cold HTTP pool, not anything that can be
-    cached by the parent worker.
-    """
+    """Load Silero VAD once per worker process so the first call doesn't pay the cost."""
     from livekit.plugins import silero
 
     proc.userdata["vad"] = silero.VAD.load()

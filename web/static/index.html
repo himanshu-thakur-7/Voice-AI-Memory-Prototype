@@ -304,10 +304,15 @@ $('#btn-hang').onclick = hangUp;
 async function startCall() {
   setStatus('Requesting token…');
   let tokenResp;
+  
+  // Generate a unique room name per call using a timestamp
+  // This bypasses LiveKit's room-recycling lag and guarantees a fresh agent instantly!
+  const uniqueRoom = "cognitive-demo-" + Date.now();
+  
   try {
     const body = customCtx
-      ? { user_id: customCtx.user_id, tenant_id: customCtx.tenant_id }
-      : { persona: activePersona };
+      ? { user_id: customCtx.user_id, tenant_id: customCtx.tenant_id, room: uniqueRoom }
+      : { persona: activePersona, room: uniqueRoom };
     tokenResp = await api('/api/token', {method:'POST', body});
   } catch (e) { toast(`Token error: ${e.detail || e.message}`); setStatus('Idle','bad'); return; }
 
@@ -381,51 +386,55 @@ function badge(el, ok, txt) {
 }
 
 async function refreshVerify() {
-  const ctx = customCtx || (activePersona ? await personaCtx(activePersona) : null);
-  if (!ctx) return;
-  let data;
   try {
-    data = await fetch(`/api/verify?tenant_id=${encodeURIComponent(ctx.tenant_id)}&user_id=${encodeURIComponent(ctx.user_id)}`)
-      .then(r => r.json());
-  } catch (e) { return; }
-  if (!data.available) { toast('Neo4j unreachable — set NEO4J_URI on the server'); return; }
+    const ctx = customCtx || (activePersona ? await personaCtx(activePersona) : null);
+    if (!ctx) return;
+    let data;
+    try {
+      data = await fetch(`/api/verify?tenant_id=${encodeURIComponent(ctx.tenant_id)}&user_id=${encodeURIComponent(ctx.user_id)}`)
+        .then(r => r.json());
+    } catch (e) { return; }
+    if (!data.available) { toast('Neo4j unreachable — set NEO4J_URI on the server'); return; }
 
-  badge($('#b-prosody'), data.checks.dynamic_prosody);
-  badge($('#b-verbosity'), data.checks.adaptive_verbosity);
-  badge($('#b-empathy'), data.checks.proactive_empathy);
-  badge($('#b-sarcasm'), data.checks.sarcasm_filter || data.checks.contradiction_decay);
-  if (data.checks.contradiction_decay && !data.checks.sarcasm_filter)
-    badge($('#b-sarcasm'), true, '✓ decay');
+    badge($('#b-prosody'), data.checks.dynamic_prosody);
+    badge($('#b-verbosity'), data.checks.adaptive_verbosity);
+    badge($('#b-empathy'), data.checks.proactive_empathy);
+    badge($('#b-sarcasm'), data.checks.sarcasm_filter || data.checks.contradiction_decay);
+    if (data.checks.contradiction_decay && !data.checks.sarcasm_filter)
+      badge($('#b-sarcasm'), true, '✓ decay');
 
-  $('#v-voice').textContent = (data.precall_voice_id || '—').slice(0, 16) + (data.precall_voice_id ? '…' : '');
-  $('#v-stab').textContent = data.precall_voice_stability != null
-    ? data.precall_voice_stability.toFixed(2) : '—';
-  $('#v-style').textContent = data.conversation_style;
-  $('#v-emo').textContent = data.affective_state ? data.affective_state.emotion : 'neutral';
-  $('#v-prompt').textContent = data.precall_system_prompt || '(no call yet)';
-  $('#v-greeting').textContent = data.precall_greeting || '(no proactive opener)';
+    $('#v-voice').textContent = (data.precall_voice_id || '—').slice(0, 16) + (data.precall_voice_id ? '…' : '');
+    $('#v-stab').textContent = data.precall_voice_stability != null
+      ? data.precall_voice_stability.toFixed(2) : '—';
+    $('#v-style').textContent = data.conversation_style;
+    $('#v-emo').textContent = data.affective_state ? data.affective_state.emotion : 'neutral';
+    $('#v-prompt').textContent = data.precall_system_prompt || '(no call yet)';
+    $('#v-greeting').textContent = data.precall_greeting || '(no proactive opener)';
 
-  renderMetrics(data);
+    renderMetrics(data);
 
-  const facts = $('#facts');
-  facts.innerHTML = data.trusted_facts.length
-    ? data.trusted_facts.map(f => `<li><span class="triplet">${escapeHtml(f)}</span></li>`).join('')
-    : '<li class="hint" style="border:none;background:none;color:var(--muted)">No high-trust facts yet.</li>';
+    const facts = $('#facts');
+    facts.innerHTML = (data.trusted_facts && data.trusted_facts.length)
+      ? data.trusted_facts.map(f => `<li><span class="triplet">${escapeHtml(f)}</span></li>`).join('')
+      : '<li class="hint" style="border:none;background:none;color:var(--muted)">No high-trust facts yet.</li>';
 
-  const sarc = $('#facts-sarcastic');
-  const sarcItems = data.sarcastic_facts.map(f => `<li class="sarcastic">
-      <span class="triplet">(${escapeHtml(f.subject)}) -[${escapeHtml(f.predicate)}]-&gt; (${escapeHtml(f.object)})
-        <div class="hint" style="font-size:11px;margin-top:3px">${escapeHtml(f.reasoning)}</div></span>
-      <span class="trust">trust ${f.trust_score.toFixed(2)}</span></li>`);
-  sarc.innerHTML = sarcItems.length ? sarcItems.join('')
-    : '<li class="hint" style="border:none;background:none;color:var(--muted)">No sarcastic rels yet. Say something positive in an agitated tone to trigger one.</li>';
+    const sarc = $('#facts-sarcastic');
+    const sarcItems = (data.sarcastic_facts || []).map(f => `<li class="sarcastic">
+        <span class="triplet">(${escapeHtml(f.subject)}) -[${escapeHtml(f.predicate)}]-&gt; (${escapeHtml(f.object)})
+          <div class="hint" style="font-size:11px;margin-top:3px">${escapeHtml(f.reasoning)}</div></span>
+        <span class="trust">trust ${f.trust_score.toFixed(2)}</span></li>`);
+    sarc.innerHTML = sarcItems.length ? sarcItems.join('')
+      : '<li class="hint" style="border:none;background:none;color:var(--muted)">No sarcastic rels yet. Say something positive in an agitated tone to trigger one.</li>';
 
-  const dec = $('#facts-decayed');
-  const decItems = data.decayed_facts.map(f => `<li class="decayed">
-      <span class="triplet">(${escapeHtml(f.subject)}) -[${escapeHtml(f.predicate)}]-&gt; (${escapeHtml(f.object)})</span>
-      <span class="trust">trust ${f.trust_score.toFixed(2)}</span></li>`);
-  dec.innerHTML = decItems.length ? decItems.join('')
-    : '<li class="hint" style="border:none;background:none;color:var(--muted)">No decayed rels yet. Contradict a seeded fact to trigger one.</li>';
+    const dec = $('#facts-decayed');
+    const decItems = (data.decayed_facts || []).map(f => `<li class="decayed">
+        <span class="triplet">(${escapeHtml(f.subject)}) -[${escapeHtml(f.predicate)}]-&gt; (${escapeHtml(f.object)})</span>
+        <span class="trust">trust ${f.trust_score.toFixed(2)}</span></li>`);
+    dec.innerHTML = decItems.length ? decItems.join('')
+      : '<li class="hint" style="border:none;background:none;color:var(--muted)">No decayed rels yet. Contradict a seeded fact to trigger one.</li>';
+  } catch (err) {
+    console.error("verify.js_render_failed", err);
+  }
 }
 
 async function personaCtx(key) {
@@ -443,81 +452,85 @@ function escapeHtml(s) {
 
 // ─── metrics tile ──────────────────────────────────────────────────────────
 function renderMetrics(data) {
-  const a = data.affective_state || {};
-  const p = a.paralinguistics || {};
-  const bio = p.acoustic_biometrics || {};
-  const ev = data.last_negative_event || {};
-  const fmt = (v, d = 2) => v == null ? '—' : (typeof v === 'number' ? v.toFixed(d) : v);
+  try {
+    const a = data.affective_state || {};
+    const p = a.paralinguistics || {};
+    const bio = p.acoustic_biometrics || {};
+    const ev = data.last_negative_event || {};
+    const fmt = (v, d = 2) => v == null ? '—' : (typeof v === 'number' ? v.toFixed(d) : v);
 
-  // [key, value, sub-label, tooltip]
-  const metrics = [
-    ['Acoustic affect',
-     fmt(p.acoustic_affect || '—', 0),
-     'librosa, peak-RMS based',
-     'What the audio "felt" like. agitated = wide pitch swings + loud peaks (anger / panic / sarcasm). subdued = flat pitch + quiet (grief / defeat). neutral = neither, treated as "no signal" so prior emotion is preserved.'],
+    // [key, value, sub-label, tooltip]
+    const metrics = [
+      ['Acoustic affect',
+       fmt(p.acoustic_affect || '—', 0),
+       'librosa, peak-RMS based',
+       'What the audio "felt" like. agitated = wide pitch swings + loud peaks (anger / panic / sarcasm). subdued = flat pitch + quiet (grief / defeat). neutral = neither, treated as "no signal" so prior emotion is preserved.'],
 
-    ['Pitch variance',
-     fmt(bio.pitch_variance ?? a.features?.pitch_variance, 1),
-     'semitones²',
-     'Variance of fundamental frequency across the call, in semitones. >25 = excitable / stressed speaker. Computed with librosa YIN over voiced frames only — silence + unvoiced speech ignored.'],
+      ['Pitch variance',
+       fmt(bio.pitch_variance ?? (a.features ? a.features.pitch_variance : undefined), 1),
+       'semitones²',
+       'Variance of fundamental frequency across the call, in semitones. >25 = excitable / stressed speaker. Computed with librosa YIN over voiced frames only — silence + unvoiced speech ignored.'],
 
-    ['Peak RMS',
-     fmt(bio.rms_peak, 4),
-     '90th-percentile energy',
-     'Loudest sustained moment in the call. >0.04 ⇒ raised voice, ⇒ contributes to "agitated" classification. We use the 90th percentile (not the mean) so one sarcastic outburst inside a calm call still triggers — averages would crush the signal.'],
+      ['Peak RMS',
+       fmt(bio.rms_peak, 4),
+       '90th-percentile energy',
+       'Loudest sustained moment in the call. >0.04 ⇒ raised voice, ⇒ contributes to "agitated" classification. We use the 90th percentile (not the mean) so one sarcastic outburst inside a calm call still triggers — averages would crush the signal.'],
 
-    ['Valence',
-     fmt(a.valence, 2),
-     '-1 negative ↔ +1 positive',
-     'Pleasantness of the emotional state. Derived from the mapped Emotion enum (frustrated≈-0.6, angry≈-0.8, happy≈+0.7). Drives the prosody profile alongside arousal.'],
+      ['Valence',
+       fmt(a.valence, 2),
+       '-1 negative ↔ +1 positive',
+       'Pleasantness of the emotional state. Derived from the mapped Emotion enum (frustrated≈-0.6, angry≈-0.8, happy≈+0.7). Drives the prosody profile alongside arousal.'],
 
-    ['Arousal',
-     fmt(a.arousal, 2),
-     '0 calm ↔ 1 panicked',
-     'Energy / activation. Calm-low (sad, neutral), high (angry, anxious, happy). Picked from the (emotion → V-A) map and lightly adjusted by acoustic biometrics.'],
+      ['Arousal',
+       fmt(a.arousal, 2),
+       '0 calm ↔ 1 panicked',
+       'Energy / activation. Calm-low (sad, neutral), high (angry, anxious, happy). Picked from the (emotion → V-A) map and lightly adjusted by acoustic biometrics.'],
 
-    ['Engine confidence',
-     fmt(a.confidence, 2),
-     'librosa 0.55 / SenseVoice 0.75',
-     'How much we trust this read. librosa-only fallback gets 0.55 (acoustic heuristics, no semantics). The SenseVoice rich engine gets 0.75 because it also reads tone+text+pacing through an LLM.'],
+      ['Engine confidence',
+       fmt(a.confidence, 2),
+       'librosa 0.55 / SenseVoice 0.75',
+       'How much we trust this read. librosa-only fallback gets 0.55 (acoustic heuristics, no semantics). The SenseVoice rich engine gets 0.75 because it also reads tone+text+pacing through an LLM.'],
 
-    ['Lexical sentiment',
-     fmt(p.lexical_sentiment || '—', 0),
-     'transcript-only',
-     'Sentiment of the TRANSCRIPT TEXT alone, ignoring how it was said. Compared against acoustic_affect to spot sarcasm — positive text + agitated tone = "Likely Sarcastic", clamps trust to 0.2 on emitted facts.'],
+      ['Lexical sentiment',
+       fmt(p.lexical_sentiment || '—', 0),
+       'transcript-only',
+       'Sentiment of the TRANSCRIPT TEXT alone, ignoring how it was said. Compared against acoustic_affect to spot sarcasm — positive text + agitated tone = "Likely Sarcastic", clamps trust to 0.2 on emitted facts.'],
 
-    ['Engine',
-     fmt(p.engine || a.features?.engine || '—', 0),
-     'librosa vs sensevoice_rich',
-     'Which engine produced these numbers. librosa is the always-on fallback. sensevoice_rich is an optional rich path that adds final_affective_state (e.g. "cynical_or_masking_grief") and unlocks the full semantic sarcasm/grief detection.'],
+      ['Engine',
+       fmt(p.engine || (a.features ? a.features.engine : undefined) || '—', 0),
+       'librosa vs sensevoice_rich',
+       'Which engine produced these numbers. librosa is the always-on fallback. sensevoice_rich is an optional rich path that adds final_affective_state (e.g. "cynical_or_masking_grief") and unlocks the full semantic sarcasm/grief detection.'],
 
-    ['Interruptions',
-     fmt(a.features?.interruption_count, 0),
-     'this call',
-     'Count of times the caller talked over the agent. >= settings.impatience_threshold (default 2) flips conversation_style to IMPATIENT and instructs the next call to answer "in 10 words or less". An agitated acoustic_affect also flips it.'],
+      ['Interruptions',
+       fmt(a.features ? a.features.interruption_count : undefined, 0),
+       'this call',
+       'Count of times the caller talked over the agent. >= settings.impatience_threshold (default 2) flips conversation_style to IMPATIENT and instructs the next call to answer "in 10 words or less". An agitated acoustic_affect also flips it.'],
 
-    ['Conversation style',
-     fmt(data.conversation_style, 0),
-     'normal | impatient',
-     'Persisted on the User node. Drives the verbosity directive in the system prompt for the NEXT call. Impatient = brief answers; normal = standard 1–2 sentence replies.'],
+      ['Conversation style',
+       fmt(data.conversation_style, 0),
+       'normal | impatient',
+       'Persisted on the User node. Drives the verbosity directive in the system prompt for the NEXT call. Impatient = brief answers; normal = standard 1–2 sentence replies.'],
 
-    ['Belief revisions',
-     fmt(data.decayed_facts.length, 0),
-     'superseded by contradiction',
-     'How many beliefs have been UPDATEd by a later contradicting statement. Each revision is preserved on the rel (trust × 0.3, superseded_at set) so the belief history is auditable — we never throw old beliefs away.'],
+      ['Belief revisions',
+       fmt(data.decayed_facts ? data.decayed_facts.length : 0, 0),
+       'superseded by contradiction',
+       'How many beliefs have been UPDATEd by a later contradicting statement. Each revision is preserved on the rel (trust × 0.3, superseded_at set) so the belief history is auditable — we never throw old beliefs away.'],
 
-    ['Last event severity',
-     fmt(ev.severity, 2),
-     ev.kind || 'none',
-     'Severity score of the most recent NegativeEvent (Flight, Loss, Job, Affect, …). When >0.6 the next pre-call greeting opens with a memory of it (Proactive Empathy). Cold-start has none until the first agitated/heavy call.'],
-  ];
+      ['Last event severity',
+       fmt(ev.severity, 2),
+       ev.kind || 'none',
+       'Severity score of the most recent NegativeEvent (Flight, Loss, Job, Affect, …). When >0.6 the next pre-call greeting opens with a memory of it (Proactive Empathy). Cold-start has none until the first agitated/heavy call.'],
+    ];
 
-  $('#metric-grid').innerHTML = metrics.map(([k, v, sub, tip]) => `
-    <div>
-      <div class="k">${escapeHtml(k)} <i class="info" tabindex="0" data-tip="${escapeHtml(tip)}">i</i></div>
-      <div class="v">${escapeHtml(v)}</div>
-      <div class="sub">${escapeHtml(sub)}</div>
-    </div>`).join('');
+    $('#metric-grid').innerHTML = metrics.map(([k, v, sub, tip]) => `
+      <div>
+        <div class="k">${escapeHtml(k)} <i class="info" tabindex="0" data-tip="${escapeHtml(tip)}">i</i></div>
+        <div class="v">${escapeHtml(v)}</div>
+        <div class="sub">${escapeHtml(sub)}</div>
+      </div>`).join('');
+  } catch (err) {
+    console.error("verify.js_render_metrics_failed", err);
+  }
 }
 
 // ─── boot ──────────────────────────────────────────────────────────────────
