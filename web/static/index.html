@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Cognitive Voice AI · Live Demo</title>
+<style>
+  :root{
+    --brand:#5b63f5; --brand-ink:#4348d8; --brand-soft:#eef0ff;
+    --accent:#10b3a3; --bg:#f5f6fb; --panel:#ffffff; --ink:#171a23; --muted:#727892;
+    --border:#e8eaf3; --ok:#16a34a; --warn:#e8920c; --danger:#e5484d;
+    --shadow:0 1px 2px rgba(20,22,40,.04), 0 10px 30px rgba(20,22,40,.06);
+    --radius:14px;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+       background:var(--bg);color:var(--ink);min-height:100vh;-webkit-font-smoothing:antialiased}
+  header{padding:22px 32px;border-bottom:1px solid var(--border);background:var(--panel);
+         display:flex;align-items:center;gap:14px;justify-content:space-between}
+  .logo{width:38px;height:38px;border-radius:11px;display:grid;place-items:center;color:#fff;
+        font-size:20px;background:linear-gradient(135deg,var(--brand),#8a73ff);
+        box-shadow:0 4px 12px rgba(91,99,245,.35)}
+  .brand b{display:block;font-size:16px;letter-spacing:-.3px}
+  .brand small{color:var(--muted);font-size:12px}
+  .pill{display:inline-flex;align-items:center;gap:7px;background:var(--bg);
+        border:1px solid var(--border);border-radius:999px;padding:6px 12px;font-size:12px;font-weight:500}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--muted)}
+  .dot.live{background:var(--ok)} .dot.mock{background:var(--warn)} .dot.bad{background:var(--danger)}
+
+  main{display:grid;grid-template-columns:380px 1fr;gap:20px;padding:24px 32px}
+  @media (max-width:980px){ main{grid-template-columns:1fr} }
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);
+        box-shadow:var(--shadow);padding:20px}
+  h2{margin:0 0 4px;font-size:15px} .hint{color:var(--muted);font-size:12.5px;margin:0 0 14px;line-height:1.55}
+
+  .persona{display:flex;flex-direction:column;gap:8px;margin-bottom:14px}
+  .persona button{appearance:none;text-align:left;border:1px solid var(--border);background:var(--panel);
+                  border-radius:10px;padding:11px 12px;cursor:pointer;font-family:inherit}
+  .persona button:hover{border-color:var(--brand)}
+  .persona button.on{border-color:var(--brand);background:var(--brand-soft);box-shadow:0 0 0 2px var(--brand-soft)}
+  .persona .who{font-weight:600;font-size:13px;color:var(--ink)}
+  .persona .blurb{margin-top:3px;font-size:12px;color:var(--muted);line-height:1.5}
+
+  .btn{appearance:none;border:1px solid transparent;border-radius:10px;padding:11px 14px;font-size:14px;
+       font-weight:600;cursor:pointer;font-family:inherit;width:100%;transition:transform .08s}
+  .btn.primary{background:var(--brand);color:#fff} .btn.primary:hover{background:var(--brand-ink)}
+  .btn.ghost{background:var(--panel);border-color:var(--border);color:var(--ink)} .btn.ghost:hover{background:var(--bg)}
+  .btn.danger{background:#fee;color:var(--danger);border-color:#fbb}
+  .btn:disabled{opacity:.5;cursor:not-allowed}
+  .row{display:flex;gap:8px;margin-top:8px}
+
+  .status{margin-top:14px;padding:10px 12px;border-radius:10px;background:var(--bg);
+          border:1px solid var(--border);font-size:13px;color:var(--muted);display:flex;align-items:center;gap:8px}
+  .levels{height:6px;background:var(--border);border-radius:3px;overflow:hidden;margin-top:6px}
+  .levels > .bar{height:100%;width:0;background:linear-gradient(90deg,var(--accent),var(--brand));
+                 transition:width .08s linear}
+
+  .checks{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-bottom:14px}
+  @media (max-width:980px){.checks{grid-template-columns:1fr}}
+  .check{padding:14px;border:1px solid var(--border);border-radius:11px;background:var(--panel)}
+  .check h3{margin:0 0 4px;font-size:13px;display:flex;align-items:center;gap:7px}
+  .check p{margin:0;font-size:12px;color:var(--muted);line-height:1.55}
+  .badge{font-size:10px;font-weight:800;letter-spacing:.4px;padding:3px 7px;border-radius:6px;color:#fff}
+  .badge.pass{background:var(--ok)} .badge.fail{background:#9aa1b5} .badge.warn{background:var(--warn)}
+
+  .panel-row{display:flex;gap:14px;flex-wrap:wrap;margin-top:10px}
+  .panel-row > div{flex:1;min-width:200px;font-size:12.5px}
+  .panel-row .k{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px}
+  .panel-row .v{font-weight:600;word-break:break-word}
+
+  .facts{list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:7px}
+  .facts li{padding:8px 11px;background:var(--bg);border:1px solid var(--border);
+            border-radius:9px;font-size:12.5px;display:flex;justify-content:space-between;gap:10px}
+  .facts li .triplet{font-family:'SF Mono',ui-monospace,Menlo,monospace;font-size:12px}
+  .facts li .trust{font-weight:700;color:var(--brand-ink);white-space:nowrap}
+  .facts li.sarcastic .trust{color:var(--warn)} .facts li.decayed .trust{color:var(--muted);text-decoration:line-through}
+  details > summary{cursor:pointer;font-size:12px;color:var(--muted);margin-top:8px}
+  details pre{background:var(--bg);border:1px solid var(--border);border-radius:9px;
+              padding:10px;font-size:11.5px;overflow:auto;white-space:pre-wrap}
+
+  .toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);background:#171a23;color:#fff;
+         padding:10px 18px;border-radius:10px;font-size:13px;opacity:0;transition:opacity .2s;pointer-events:none}
+  .toast.show{opacity:1}
+  .hidden{display:none}
+  code{background:var(--bg);padding:1px 6px;border-radius:5px;font-size:11.5px}
+</style>
+</head>
+<body>
+  <header>
+    <div style="display:flex;align-items:center;gap:13px">
+      <div class="logo">◈</div>
+      <div class="brand"><b>Cognitive Voice AI</b><small>LiveKit + Neo4j · demo console</small></div>
+    </div>
+    <div id="status-pills"></div>
+  </header>
+
+  <main>
+    <!-- LEFT: persona + call controls -->
+    <section class="card">
+      <h2>Pick a caller</h2>
+      <p class="hint">Each persona seeds Neo4j to a known state. The agent reads that state
+      and personalizes the call before saying its first word.</p>
+      <div class="persona" id="persona-list"></div>
+
+      <div class="row">
+        <button class="btn ghost" id="btn-seed">Seed graph</button>
+        <button class="btn primary" id="btn-call">Start call</button>
+      </div>
+      <button class="btn danger hidden" id="btn-hang" style="margin-top:8px">Hang up</button>
+
+      <div class="status" id="status">
+        <span class="dot" id="status-dot"></span>
+        <span id="status-text">Idle</span>
+      </div>
+      <div class="levels" id="levels-wrap"><div class="bar" id="mic-bar"></div></div>
+
+      <details>
+        <summary>Custom user_id / tenant_id</summary>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px">
+          <input id="custom-user" placeholder="user_id"
+                 style="padding:9px;border:1px solid var(--border);border-radius:8px;font-family:inherit" />
+          <input id="custom-tenant" placeholder="tenant_id (demo-t1)"
+                 style="padding:9px;border:1px solid var(--border);border-radius:8px;font-family:inherit" />
+        </div>
+        <button class="btn ghost" style="margin-top:8px" id="btn-use-custom">Use custom</button>
+      </details>
+    </section>
+
+    <!-- RIGHT: verification -->
+    <section class="card">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+        <div>
+          <h2>What landed in the cognitive graph</h2>
+          <p class="hint">Auto-refreshes after a call ends. The four "wow" features map 1:1
+          to the tiles below.</p>
+        </div>
+        <button class="btn ghost" id="btn-refresh" style="width:auto;padding:7px 12px">Refresh</button>
+      </div>
+
+      <div class="checks">
+        <div class="check" id="check-prosody">
+          <h3>Dynamic Prosody <span class="badge fail" id="b-prosody">pending</span></h3>
+          <p id="t-prosody">Frustrated → calm voice + stability 0.95.</p>
+        </div>
+        <div class="check" id="check-verbosity">
+          <h3>Adaptive Verbosity <span class="badge fail" id="b-verbosity">pending</span></h3>
+          <p id="t-verbosity">Impatient style → "10 words or less" prompt.</p>
+        </div>
+        <div class="check" id="check-empathy">
+          <h3>Proactive Empathy <span class="badge fail" id="b-empathy">pending</span></h3>
+          <p id="t-empathy">Severe negative event → spoken greeting about it.</p>
+        </div>
+        <div class="check" id="check-sarcasm">
+          <h3>Sarcasm Filter <span class="badge fail" id="b-sarcasm">pending</span></h3>
+          <p id="t-sarcasm">Positive text + agitated tone → trust_score 0.2.</p>
+        </div>
+      </div>
+
+      <h2 style="margin-top:8px">Pre-call decision</h2>
+      <div class="panel-row" id="precall-row">
+        <div><div class="k">Voice ID</div><div class="v" id="v-voice">—</div></div>
+        <div><div class="k">Stability</div><div class="v" id="v-stab">—</div></div>
+        <div><div class="k">Style</div><div class="v" id="v-style">normal</div></div>
+        <div><div class="k">Emotion</div><div class="v" id="v-emo">neutral</div></div>
+      </div>
+      <details>
+        <summary>system prompt</summary>
+        <pre id="v-prompt">(no call yet)</pre>
+      </details>
+      <details>
+        <summary>greeting</summary>
+        <pre id="v-greeting">(no proactive opener)</pre>
+      </details>
+
+      <h2 style="margin-top:18px">Trusted facts</h2>
+      <ul class="facts" id="facts"></ul>
+
+      <h2 style="margin-top:18px">Sarcastic / decayed</h2>
+      <ul class="facts" id="facts-extra"></ul>
+    </section>
+  </main>
+
+  <div class="toast" id="toast"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/livekit-client@2.5.0/dist/livekit-client.umd.min.js"></script>
+<script>
+const $ = s => document.querySelector(s);
+const api = (path, opts={}) => fetch(path, {
+  headers: {'Content-Type':'application/json'},
+  ...opts,
+  body: opts.body ? JSON.stringify(opts.body) : undefined,
+}).then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(e)));
+
+let activePersona = null;
+let customCtx = null;
+let room = null;
+let audioCtx = null, micAnalyser = null, levelRAF = null;
+
+const toast = (t) => {
+  const el = $('#toast'); el.textContent = t; el.classList.add('show');
+  setTimeout(() => el.classList.remove('show'), 1900);
+};
+
+const setStatus = (text, kind='') => {
+  $('#status-text').textContent = text;
+  const dot = $('#status-dot');
+  dot.className = 'dot' + (kind ? ' ' + kind : '');
+};
+
+// ─── personas ──────────────────────────────────────────────────────────────
+async function loadPersonas() {
+  const { personas } = await api('/api/personas');
+  const wrap = $('#persona-list');
+  wrap.innerHTML = personas.map(p => `
+    <button data-key="${p.key}">
+      <div class="who">${p.label}</div>
+      <div class="blurb">${p.blurb}</div>
+    </button>`).join('');
+  wrap.querySelectorAll('button').forEach(b => b.onclick = () => selectPersona(b.dataset.key));
+  selectPersona(personas[0].key);
+}
+
+function selectPersona(key) {
+  activePersona = key; customCtx = null;
+  document.querySelectorAll('#persona-list button').forEach(b =>
+    b.classList.toggle('on', b.dataset.key === key));
+}
+
+// ─── seed ──────────────────────────────────────────────────────────────────
+$('#btn-seed').onclick = async () => {
+  if (customCtx) { toast('Custom user — nothing to seed'); return; }
+  setStatus('Seeding Neo4j…');
+  try {
+    const r = await api('/api/seed', {method:'POST', body:{persona: activePersona}});
+    toast(`Seeded: ${r.user_id} (${r.plan})`);
+    setStatus('Idle'); refreshVerify();
+  } catch (e) {
+    toast(`Seed failed: ${e.detail || e.message || 'unknown'}`); setStatus('Idle','bad');
+  }
+};
+
+$('#btn-use-custom').onclick = () => {
+  const u = $('#custom-user').value.trim();
+  if (!u) { toast('user_id required'); return; }
+  customCtx = { user_id: u, tenant_id: $('#custom-tenant').value.trim() || 'demo-t1' };
+  document.querySelectorAll('#persona-list button').forEach(b => b.classList.remove('on'));
+  toast(`Using custom user "${u}"`);
+};
+
+// ─── call ──────────────────────────────────────────────────────────────────
+$('#btn-call').onclick = startCall;
+$('#btn-hang').onclick = hangUp;
+
+async function startCall() {
+  setStatus('Requesting token…');
+  let tokenResp;
+  try {
+    const body = customCtx
+      ? { user_id: customCtx.user_id, tenant_id: customCtx.tenant_id }
+      : { persona: activePersona };
+    tokenResp = await api('/api/token', {method:'POST', body});
+  } catch (e) { toast(`Token error: ${e.detail || e.message}`); setStatus('Idle','bad'); return; }
+
+  setStatus('Connecting to LiveKit…');
+  room = new LivekitClient.Room({ adaptiveStream:true, dynacast:true });
+  room.on(LivekitClient.RoomEvent.ParticipantConnected, p => {
+    if (p.identity.includes('agent') || !p.identity.startsWith('web-')) {
+      setStatus('Connected · agent in room', 'live');
+    }
+  });
+  room.on(LivekitClient.RoomEvent.TrackSubscribed, (track) => {
+    if (track.kind === LivekitClient.Track.Kind.Audio) track.attach();   // hear the agent
+  });
+  room.on(LivekitClient.RoomEvent.Disconnected, () => {
+    setStatus('Disconnected', '');
+    $('#btn-hang').classList.add('hidden'); $('#btn-call').classList.remove('hidden');
+    stopMicLevels();
+    setTimeout(refreshVerify, 2500);    // give the post-call worker a head start
+    setTimeout(refreshVerify, 6000);
+  });
+
+  try {
+    await room.connect(tokenResp.url, tokenResp.token);
+    await room.localParticipant.setMicrophoneEnabled(true);
+    startMicLevels();
+    setStatus('In call · speak now', 'live');
+    $('#btn-call').classList.add('hidden'); $('#btn-hang').classList.remove('hidden');
+  } catch (e) {
+    toast(`Connect failed: ${e.message}`); setStatus('Idle','bad');
+  }
+}
+
+async function hangUp() {
+  if (room) await room.disconnect();
+}
+
+// ─── mic level visualizer ──────────────────────────────────────────────────
+async function startMicLevels() {
+  try {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const stream = await navigator.mediaDevices.getUserMedia({audio:true});
+    const src = audioCtx.createMediaStreamSource(stream);
+    micAnalyser = audioCtx.createAnalyser(); micAnalyser.fftSize = 512;
+    src.connect(micAnalyser);
+    const buf = new Uint8Array(micAnalyser.frequencyBinCount);
+    const tick = () => {
+      if (!micAnalyser) return;
+      micAnalyser.getByteFrequencyData(buf);
+      let s = 0; for (const v of buf) s += v;
+      const avg = s / buf.length;
+      $('#mic-bar').style.width = Math.min(100, (avg / 80) * 100) + '%';
+      levelRAF = requestAnimationFrame(tick);
+    }; tick();
+  } catch (e) { console.warn('Mic viz failed:', e); }
+}
+
+function stopMicLevels() {
+  cancelAnimationFrame(levelRAF);
+  if (audioCtx) audioCtx.close();
+  audioCtx = null; micAnalyser = null;
+  $('#mic-bar').style.width = '0%';
+}
+
+// ─── verify panel ──────────────────────────────────────────────────────────
+$('#btn-refresh').onclick = refreshVerify;
+
+function badge(el, ok, txt) {
+  el.className = 'badge ' + (ok ? 'pass' : 'fail');
+  el.textContent = ok ? '✓ pass' : 'pending';
+  if (txt) el.textContent = txt;
+}
+
+async function refreshVerify() {
+  const ctx = customCtx || (activePersona ? await personaCtx(activePersona) : null);
+  if (!ctx) return;
+  let data;
+  try {
+    data = await fetch(`/api/verify?tenant_id=${encodeURIComponent(ctx.tenant_id)}&user_id=${encodeURIComponent(ctx.user_id)}`)
+      .then(r => r.json());
+  } catch (e) { return; }
+  if (!data.available) { toast('Neo4j unreachable — set NEO4J_URI on the server'); return; }
+
+  badge($('#b-prosody'), data.checks.dynamic_prosody);
+  badge($('#b-verbosity'), data.checks.adaptive_verbosity);
+  badge($('#b-empathy'), data.checks.proactive_empathy);
+  badge($('#b-sarcasm'), data.checks.sarcasm_filter || data.checks.contradiction_decay);
+  if (data.checks.contradiction_decay && !data.checks.sarcasm_filter)
+    badge($('#b-sarcasm'), true, '✓ decay');
+
+  $('#v-voice').textContent = (data.precall_voice_id || '—').slice(0, 16) + (data.precall_voice_id ? '…' : '');
+  $('#v-stab').textContent = data.precall_voice_stability != null
+    ? data.precall_voice_stability.toFixed(2) : '—';
+  $('#v-style').textContent = data.conversation_style;
+  $('#v-emo').textContent = data.affective_state ? data.affective_state.emotion : 'neutral';
+  $('#v-prompt').textContent = data.precall_system_prompt || '(no call yet)';
+  $('#v-greeting').textContent = data.precall_greeting || '(no proactive opener)';
+
+  const facts = $('#facts');
+  facts.innerHTML = data.trusted_facts.length
+    ? data.trusted_facts.map(f => `<li><span class="triplet">${escapeHtml(f)}</span></li>`).join('')
+    : '<li class="hint" style="border:none;background:none;color:var(--muted)">No high-trust facts yet.</li>';
+
+  const extra = $('#facts-extra');
+  const items = [
+    ...data.sarcastic_facts.map(f => `<li class="sarcastic">
+      <span class="triplet">(${escapeHtml(f.subject)}) -[${escapeHtml(f.predicate)}]-&gt; (${escapeHtml(f.object)})
+        <div class="hint" style="font-size:11px;margin-top:3px">${escapeHtml(f.reasoning)}</div></span>
+      <span class="trust">trust ${f.trust_score.toFixed(2)}</span></li>`),
+    ...data.decayed_facts.map(f => `<li class="decayed">
+      <span class="triplet">(${escapeHtml(f.subject)}) -[${escapeHtml(f.predicate)}]-&gt; (${escapeHtml(f.object)})</span>
+      <span class="trust">trust ${f.trust_score.toFixed(2)}</span></li>`),
+  ];
+  extra.innerHTML = items.length ? items.join('')
+    : '<li class="hint" style="border:none;background:none;color:var(--muted)">No sarcastic or decayed rels yet.</li>';
+}
+
+async function personaCtx(key) {
+  // Pull from the personas catalog we already fetched.
+  const { personas } = await api('/api/personas');
+  const p = personas.find(p => p.key === key);
+  return p ? { user_id: p.user_id, tenant_id: p.tenant_id } : null;
+}
+
+function escapeHtml(s) {
+  return (s ?? '').toString()
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+// ─── boot ──────────────────────────────────────────────────────────────────
+async function boot() {
+  try {
+    const r = await fetch('/healthz').then(r => r.json());
+    $('#status-pills').innerHTML = `<span class="pill"><span class="dot live"></span>server up</span>`;
+  } catch { $('#status-pills').innerHTML = `<span class="pill"><span class="dot bad"></span>server down</span>`; }
+  await loadPersonas();
+  refreshVerify();
+}
+boot();
+</script>
+</body>
+</html>

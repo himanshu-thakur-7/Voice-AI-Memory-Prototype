@@ -119,29 +119,39 @@ async def entrypoint(ctx) -> None:  # noqa: ANN001 — JobContext (lazy import)
     recorder = CallerAudioRecorder()
     recorder.attach(ctx.room, target_identity=pctx.participant_identity)
 
-    # Build the per-call pipeline.
+    # Build the per-call pipeline. AgentSession 1.x requires real STT/LLM/TTS objects (or
+    # LiveKit-hosted inference strings) — passing None silently breaks things. Fail fast
+    # with a clear message that points to the .env knob the user needs to set.
+    missing: list[str] = []
+    if not settings.has_deepgram:
+        missing.append("DEEPGRAM_API_KEY (STT)")
+    if not settings.has_openai:
+        missing.append("OPENAI_API_KEY (LLM)")
+    if not settings.has_elevenlabs:
+        missing.append("ELEVENLABS_API_KEY (TTS)")
+    if missing:
+        log.error("agent.config.incomplete", missing=missing,
+                  hint="Fill these in .env, then re-run `python agent.py dev`.")
+        return
+
     vad = ctx.proc.userdata.get("vad") or silero.VAD.load()
-    stt = deepgram.STT(model=settings.deepgram_model) if settings.has_deepgram else None
-    llm = openai.LLM(model=settings.llm_model) if settings.has_openai else None
-    tts = (
-        elevenlabs.TTS(
-            voice=elevenlabs.Voice(
-                id=pre.voice_id,
-                settings=elevenlabs.VoiceSettings(
-                    stability=pre.voice_settings.stability,
-                    similarity_boost=pre.voice_settings.similarity_boost,
-                    style=pre.voice_settings.style,
-                    speed=pre.voice_settings.speed,
-                    use_speaker_boost=pre.voice_settings.use_speaker_boost,
-                ),
+    stt = deepgram.STT(model=settings.deepgram_model)
+    llm = openai.LLM(model=settings.llm_model)
+    tts = elevenlabs.TTS(
+        voice=elevenlabs.Voice(
+            id=pre.voice_id,
+            settings=elevenlabs.VoiceSettings(
+                stability=pre.voice_settings.stability,
+                similarity_boost=pre.voice_settings.similarity_boost,
+                style=pre.voice_settings.style,
+                speed=pre.voice_settings.speed,
+                use_speaker_boost=pre.voice_settings.use_speaker_boost,
             ),
-        )
-        if settings.has_elevenlabs
-        else None
+        ),
     )
 
     agent = Agent(instructions=pre.system_prompt)
-    session = AgentSession(vad=vad, stt=stt, llm=llm, tts=tts)
+    session: AgentSession = AgentSession(vad=vad, stt=stt, llm=llm, tts=tts)
     await session.start(agent=agent, room=ctx.room)
 
     # Proactive Empathy: open with the remembered event when present.

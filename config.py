@@ -53,6 +53,10 @@ class Settings(BaseSettings):
         "Keep replies to one or two sentences. Never use markdown or emoji."
     )
 
+    # ── Web demo (web/server.py) ────────────────────────────────────────────
+    web_host: str = "0.0.0.0"
+    web_port: int = 8000
+
     # ── Convenience flags ────────────────────────────────────────────────────
     @property
     def has_openai(self) -> bool:

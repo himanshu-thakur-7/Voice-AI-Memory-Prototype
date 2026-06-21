@@ -136,7 +136,7 @@ def schedule_egress(  # pragma: no cover — runs against a real LiveKit server
     from livekit import api
 
     client = api.LiveKitAPI(livekit_url, api_key, api_secret)
-    req = api.StartTrackEgressRequest(
+    req = api.StartTrackEgressRequest(  # type: ignore[attr-defined]   # missing from stubs
         room_name=room_name,
         track_id=audio_track_id,
         file=api.EncodedFileOutput(filepath=output_filepath),

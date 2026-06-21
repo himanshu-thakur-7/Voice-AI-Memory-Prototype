@@ -9,6 +9,11 @@ livekit-plugins-elevenlabs~=1.6
 livekit-plugins-deepgram~=1.6
 livekit-plugins-silero~=1.6
 
+# Web demo (web/server.py) — token-mint + persona seed + verify panel.
+# Lives in the same venv as the worker; runs as its own process.
+fastapi>=0.110
+uvicorn[standard]>=0.30
+
 # Cognitive memory layer.
 neo4j>=5.20             # official async driver (AsyncGraphDatabase)
 openai>=1.30            # post-call LLM fact extraction + sarcasm classification
