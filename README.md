@@ -15,6 +15,13 @@ The voice-AI platform layer (Vapi, Bland, Retell, Synthflow) is converging on a 
 
 ---
 
+---
+## Architecture Diagram
+
+<img width="1376" height="768" alt="unknown" src="https://github.com/user-attachments/assets/38056d64-9f71-4167-be95-a50f3a131921" />
+
+---
+
 ## The four "wow" features
 
 | # | Feature | Implementation |
